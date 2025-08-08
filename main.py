@@ -278,12 +278,12 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
     # Report type names in v3 use "spKeyword" (keywords) with DAILY time unit.
     create_body = {
     "name": f"spKeywords_{_ymd(start_date)}_{_ymd(end_date)}",
-    "startDate": _ymd(start_date),          # <-- YYYY-MM-DD
-    "endDate": _ymd(end_date),              # <-- YYYY-MM-DD
-    "timeUnit": "DAILY",
-    "reportTypeId": "spKeywords",           # v3 report type id
+    "startDate": _ymd(start_date),          # YYYY-MM-DD
+    "endDate": _ymd(end_date),              # YYYY-MM-DD
     "configuration": {
         "adProduct": "SPONSORED_PRODUCTS",
+        "reportTypeId": "spKeywords",       # <-- moved into configuration
+        "timeUnit": "DAILY",                # <-- moved into configuration
         "groupBy": ["campaign", "adGroup", "keyword"],
         "columns": [
             "campaignId","campaignName",
@@ -295,6 +295,7 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
         "format": "GZIP_JSON"
     }
 }
+
 
     with httpx.Client(timeout=60) as client:
         cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
