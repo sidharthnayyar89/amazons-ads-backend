@@ -1,8 +1,136 @@
-import os, urllib.parse, json
-from fastapi import HTTPException
+from datetime import date
+from typing import List
+from fastapi import FastAPI, Query, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+import uuid
+import os
+import urllib.parse
+import json
 import httpx
+from fastapi.templating import Jinja2Templates
 
-# Helper to pick region base
+# ======================================================
+# APP SETUP
+# ======================================================
+
+app = FastAPI(title="Ads Pull API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+templates = Jinja2Templates(directory="templates")
+
+# ======================================================
+# DATA MODELS
+# ======================================================
+
+class Metrics(BaseModel):
+    impressions: int
+    clicks: int
+    spend: float
+    sales: float
+    orders: int
+    cpc: float
+    ctr: float
+    acos: float
+    roas: float
+
+class KeywordRow(BaseModel):
+    run_id: str
+    pulled_at: date
+    marketplace: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    entity_type: str
+    keyword_id: str
+    keyword_text: str
+    match_type: str
+    bid: float
+    lookback_days: int
+    buffer_days: int
+    metrics: Metrics
+
+# ======================================================
+# MOCK DATA FUNCTION (TEMPORARY)
+# ======================================================
+
+def _mock_pull_sp_keywords(marketplace: str, lookback_days: int, buffer_days: int, limit: int = 200) -> List[KeywordRow]:
+    run_id = str(uuid.uuid4())
+    pulled_at = date.today()
+    data: List[KeywordRow] = []
+    for i in range(limit):
+        clicks = (i % 50) + 1
+        impressions = clicks * 40
+        cpc = round(2 + (i % 7) * 0.5, 2)
+        spend = round(clicks * cpc, 2)
+        orders = (i % 6)
+        sales = round(orders * 200.0, 2)
+        ctr = round(clicks / max(1, impressions), 4)
+        acos = round(spend / max(0.01, sales), 4) if sales > 0 else 0.0
+        roas = round(sales / max(0.01, spend), 4) if spend > 0 else 0.0
+        data.append(KeywordRow(
+            run_id=run_id,
+            pulled_at=pulled_at,
+            marketplace=marketplace,
+            campaign_id=f"cmp_{i//20}",
+            campaign_name=f"Campaign {(i//20)+1}",
+            ad_group_id=f"ag_{i//10}",
+            ad_group_name=f"AdGroup {(i//10)+1}",
+            entity_type="keyword",
+            keyword_id=f"kw_{i}",
+            keyword_text=f"screen cleaner {(i%10)+1}",
+            match_type=["exact", "phrase", "broad"][i % 3],
+            bid=round(3.0 + (i % 5) * 0.25, 2),
+            lookback_days=lookback_days,
+            buffer_days=buffer_days,
+            metrics=Metrics(
+                impressions=impressions,
+                clicks=clicks,
+                spend=spend,
+                sales=sales,
+                orders=orders,
+                cpc=cpc,
+                ctr=ctr,
+                acos=acos,
+                roas=roas,
+            )
+        ))
+    return data
+
+# ======================================================
+# BASIC ROUTES
+# ======================================================
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/api/sp/keywords", response_model=List[KeywordRow])
+def get_sp_keywords(
+    marketplace: str = "IN",
+    lookback_days: int = 14,
+    buffer_days: int = 1,
+    limit: int = 200,
+):
+    return _mock_pull_sp_keywords(marketplace, lookback_days, buffer_days, limit)
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+# ======================================================
+# AMAZON ADS API HELPERS
+# ======================================================
+
 def _ads_base(region: str) -> str:
     region = (region or "NA").upper()
     if region == "EU":
@@ -17,12 +145,16 @@ def _env(name: str) -> str:
         raise HTTPException(status_code=500, detail=f"Missing env var: {name}")
     return v
 
+# ======================================================
+# AMAZON OAUTH ROUTES
+# ======================================================
+
 @app.get("/api/amzn/oauth/start")
 def amzn_oauth_start():
     client_id = _env("AMZN_CLIENT_ID")
     redirect_uri = "https://amazons-ads-backend.onrender.com/api/amzn/oauth/callback"
     scope = "cpc_advertising:campaign_management"
-    # LWA authorize URL
+
     params = {
         "client_id": client_id,
         "scope": scope,
@@ -30,11 +162,7 @@ def amzn_oauth_start():
         "redirect_uri": redirect_uri,
     }
     url = "https://www.amazon.com/ap/oa?" + urllib.parse.urlencode(params)
-    # Return an HTML that redirects (some hosts block 307s from APIs)
-    return HTMLResponse(
-        f'<a href="{url}">Continue to Amazon consent</a>'
-        f'<script>location.href="{url}"</script>'
-    )
+    return HTMLResponse(f'<a href="{url}">Continue to Amazon consent</a><script>location.href="{url}"</script>')
 
 @app.get("/api/amzn/oauth/callback")
 def amzn_oauth_callback(code: str = "", error: str = ""):
@@ -47,7 +175,6 @@ def amzn_oauth_callback(code: str = "", error: str = ""):
     client_secret = _env("AMZN_CLIENT_SECRET")
     redirect_uri = "https://amazons-ads-backend.onrender.com/api/amzn/oauth/callback"
 
-    # Exchange code for access + refresh token
     token_url = "https://api.amazon.com/auth/o2/token"
     data = {
         "grant_type": "authorization_code",
@@ -61,7 +188,6 @@ def amzn_oauth_callback(code: str = "", error: str = ""):
         r.raise_for_status()
         tok = r.json()
 
-    # Show the refresh token so you can store it in Render
     return HTMLResponse(
         "<h2>Copy your refresh token below (keep it secret):</h2>"
         f"<pre style='white-space:pre-wrap'>{json.dumps(tok, indent=2)}</pre>"
@@ -70,13 +196,11 @@ def amzn_oauth_callback(code: str = "", error: str = ""):
 
 @app.get("/api/amzn/profiles")
 def amzn_profiles():
-    # Use your stored refresh token to get an access token, then list profiles
     client_id = _env("AMZN_CLIENT_ID")
     client_secret = _env("AMZN_CLIENT_SECRET")
     refresh_token = _env("AMZN_REFRESH_TOKEN")
     region = os.environ.get("AMZN_REGION", "NA").upper()
 
-    # 1) exchange refresh token → access token
     token_url = "https://api.amazon.com/auth/o2/token"
     tok_data = {
         "grant_type": "refresh_token",
@@ -89,7 +213,6 @@ def amzn_profiles():
         tr.raise_for_status()
         access_token = tr.json()["access_token"]
 
-        # 2) call profiles endpoint
         ads_base = _ads_base(region)
         pr = client.get(
             f"{ads_base}/v2/profiles",
