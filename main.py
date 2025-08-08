@@ -302,9 +302,25 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
         }
     }
 
-    with httpx.Client(timeout=60) as client:
+        with httpx.Client(timeout=60) as client:
         cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
-        if cr.status_code >= 400:
+
+        # normal: created
+        if 200 <= cr.status_code < 300:
+            report_id = cr.json().get("reportId")
+
+        # duplicate request: reuse existing report id from error detail (HTTP 425)
+        elif cr.status_code == 425:
+            try:
+                err = cr.json()
+                # detail looks like: "The Request is a duplicate of : <uuid>"
+                import re
+                m = re.search(r"([0-9a-fA-F-]{36})", err.get("detail", ""))
+                report_id = m.group(1) if m else None
+            except Exception:
+                report_id = None
+
+        else:
             return JSONResponse(
                 status_code=502,
                 content={
@@ -315,13 +331,7 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
                     "payload": create_body,
                 },
             )
-        report_id = cr.json().get("reportId")
 
-    if not report_id:
-        raise HTTPException(
-            status_code=502,
-            detail={"stage": "create_report", "error": "No reportId in response", "body": cr.text},
-        )
 
     # 4) poll until status=SUCCESS (configurable wait; default 5 min)
     status_url = f"{ads_base}/reporting/reports/{report_id}"
