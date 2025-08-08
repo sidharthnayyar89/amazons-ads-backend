@@ -153,7 +153,7 @@ def _env(name: str) -> str:
 def amzn_oauth_start():
     client_id = _env("AMZN_CLIENT_ID")
     redirect_uri = "https://amazons-ads-backend.onrender.com/api/amzn/oauth/callback"
-    scope = "cpc_advertising:campaign_management"
+    scope = "advertising::campaign_management"
 
     params = {
         "client_id": client_id,
