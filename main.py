@@ -266,7 +266,7 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
     """
     Pull real Sponsored Products Keyword performance via Reports v3 and map to our table shape.
     """
-    import datetime, io, gzip, time
+    import datetime, io, gzip, time, re
 
     # 1) dates with attribution buffer
     end_date = datetime.date.today() - datetime.timedelta(days=max(0, buffer_days))
@@ -278,10 +278,11 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
 
-    # 3) create report job (Reports v3)
+    # helper for dates
     def _ymd(d: datetime.date) -> str:
         return d.strftime("%Y-%m-%d")
 
+    # 3) create report job (Reports v3)
     create_body = {
         "name": f"spKeywords_{_ymd(start_date)}_{_ymd(end_date)}",
         "startDate": _ymd(start_date),
@@ -302,7 +303,7 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
         }
     }
 
-        with httpx.Client(timeout=60) as client:
+    with httpx.Client(timeout=60) as client:
         cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
 
         # normal: created
@@ -313,8 +314,6 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
         elif cr.status_code == 425:
             try:
                 err = cr.json()
-                # detail looks like: "The Request is a duplicate of : <uuid>"
-                import re
                 m = re.search(r"([0-9a-fA-F-]{36})", err.get("detail", ""))
                 report_id = m.group(1) if m else None
             except Exception:
@@ -332,6 +331,11 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
                 },
             )
 
+    if not report_id:
+        raise HTTPException(
+            status_code=502,
+            detail={"stage": "create_report", "error": "No reportId in response", "body": cr.text},
+        )
 
     # 4) poll until status=SUCCESS (configurable wait; default 5 min)
     status_url = f"{ads_base}/reporting/reports/{report_id}"
@@ -411,7 +415,7 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
             keyword_id=keyword_id,
             keyword_text=keyword_text,
             match_type=match_type,
-            bid=0.0,  # not provided by this report; optional enrichment later
+            bid=0.0,  # not in this report; optional enrichment later
             lookback_days=lookback_days,
             buffer_days=buffer_days,
             metrics=Metrics(
