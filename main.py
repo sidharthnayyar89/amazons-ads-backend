@@ -263,7 +263,11 @@ def _ymd(d: datetime.date) -> str:
 
 @app.get("/api/sp/keywords_live", response_model=List[KeywordRow])
 def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int = 1000):
-    """Pull real Sponsored Products Keyword performance via Reports v3 and map to our table shape."""
+    """
+    Pull real Sponsored Products Keyword performance via Reports v3 and map to our table shape.
+    """
+    import datetime, io, gzip, time
+
     # 1) dates with attribution buffer
     end_date = datetime.date.today() - datetime.timedelta(days=max(0, buffer_days))
     start_date = end_date - datetime.timedelta(days=max(1, lookback_days) - 1)
@@ -275,71 +279,80 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
     headers = _ads_headers(access)
 
     # 3) create report job (Reports v3)
-    # Report type names in v3 use "spKeyword" (keywords) with DAILY time unit.
+    def _ymd(d: datetime.date) -> str:
+        return d.strftime("%Y-%m-%d")
+
     create_body = {
-    "name": f"spKeywords_{_ymd(start_date)}_{_ymd(end_date)}",
-    "startDate": _ymd(start_date),
-    "endDate": _ymd(end_date),
-    "configuration": {
-        "adProduct": "SPONSORED_PRODUCTS",
-        "reportTypeId": "spKeywords",
-        "timeUnit": "DAILY",
-        "groupBy": ["adGroup"],  # <-- only adGroup allowed
-        "columns": [
-            "campaignId","campaignName",
-            "adGroupId","adGroupName",
-            "keywordId","keywordText","matchType",
-            "impressions","clicks","cost",
-            "attributedSales14d","attributedConversions14d"
-        ],
-        "format": "GZIP_JSON"
+        "name": f"spKeywords_{_ymd(start_date)}_{_ymd(end_date)}",
+        "startDate": _ymd(start_date),
+        "endDate": _ymd(end_date),
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "reportTypeId": "spKeywords",
+            "timeUnit": "DAILY",
+            "groupBy": ["adGroup"],  # only adGroup is allowed for this report
+            "columns": [
+                "campaignId","campaignName",
+                "adGroupId","adGroupName",
+                "keywordId","keywordText","matchType",
+                "impressions","clicks","cost",
+                "attributedSales14d","attributedConversions14d"
+            ],
+            "format": "GZIP_JSON"
+        }
     }
-}
 
     with httpx.Client(timeout=60) as client:
         cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
         if cr.status_code >= 400:
-            return JSONResponse(status_code=502, content={"stage":"create_report","status":cr.status_code,"body":cr.text,"endpoint":f"{ads_base}/reporting/reports","payload":create_body})
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "stage": "create_report",
+                    "status": cr.status_code,
+                    "body": cr.text,
+                    "endpoint": f"{ads_base}/reporting/reports",
+                    "payload": create_body,
+                },
+            )
         report_id = cr.json().get("reportId")
 
     if not report_id:
-        raise HTTPException(status_code=502, detail={"stage":"create_report","error":"No reportId in response","body":cr.text})
+        raise HTTPException(
+            status_code=502,
+            detail={"stage": "create_report", "error": "No reportId in response", "body": cr.text},
+        )
 
-    # 4) poll until status=SUCCESS (small backoff)
+    # 4) poll until status=SUCCESS (configurable wait; default 5 min)
     status_url = f"{ads_base}/reporting/reports/{report_id}"
+    wait_seconds = int(os.environ.get("AMZN_REPORT_WAIT_SECONDS", "300"))  # 300s = 5 min
+    deadline = time.time() + wait_seconds
+
+    download_url = None
     with httpx.Client(timeout=60) as client:
-        for _ in range(30):  # ~30 * 2s = ~60s
+        while time.time() < deadline:
             sr = client.get(status_url, headers=headers)
             if sr.status_code >= 400:
-                return JSONResponse(status_code=502, content={"stage":"check_report","status":sr.status_code,"body":sr.text,"url":status_url})
+                return JSONResponse(
+                    status_code=502,
+                    content={"stage": "check_report", "status": sr.status_code, "body": sr.text, "url": status_url},
+                )
             s = sr.json()
             if s.get("status") == "SUCCESS" and s.get("url"):
                 download_url = s["url"]
                 break
-            if s.get("status") in {"FAILURE","CANCELLED"}:
-                return JSONResponse(status_code=502, content={"stage":"check_report","status":"FAILED","body":s})
-            import time
-wait_seconds = int(os.environ.get("AMZN_REPORT_WAIT_SECONDS", "300"))  # default 5 min
-deadline = time.time() + wait_seconds
-while time.time() < deadline:
-    sr = client.get(status_url, headers=headers)
-    if sr.status_code >= 400:
-        return JSONResponse(status_code=502, content={"stage":"check_report","status":sr.status_code,"body":sr.text,"url":status_url})
-    s = sr.json()
-    if s.get("status") == "SUCCESS" and s.get("url"):
-        download_url = s["url"]; break
-    if s.get("status") in {"FAILURE","CANCELLED"}:
-        return JSONResponse(status_code=502, content={"stage":"check_report","status":"FAILED","body":s})
-    time.sleep(3)  # gentle backoff
-else:
-    return JSONResponse(status_code=504, content={"stage":"check_report","status":"TIMEOUT","url":status_url})
+            if s.get("status") in {"FAILURE", "CANCELLED"}:
+                return JSONResponse(status_code=502, content={"stage": "check_report", "status": "FAILED", "body": s})
+            time.sleep(3)
 
+    if not download_url:
+        return JSONResponse(status_code=504, content={"stage": "check_report", "status": "TIMEOUT", "url": status_url})
 
     # 5) download and parse GZIP JSON lines
     with httpx.Client(timeout=120) as client:
         dr = client.get(download_url, headers=headers)
         if dr.status_code >= 400:
-            return JSONResponse(status_code=502, content={"stage":"download","status":dr.status_code,"body":dr.text})
+            return JSONResponse(status_code=502, content={"stage": "download", "status": dr.status_code, "body": dr.text})
         buf = io.BytesIO(dr.content)
         with gzip.GzipFile(fileobj=buf) as gz:
             raw = gz.read().decode("utf-8")
@@ -357,14 +370,13 @@ else:
         except Exception:
             continue
 
-        # Safe fetches with defaults
-        campaign_id = str(rec.get("campaignId",""))
-        campaign_name = rec.get("campaignName","")
-        ad_group_id = str(rec.get("adGroupId",""))
-        ad_group_name = rec.get("adGroupName","")
-        keyword_id = str(rec.get("keywordId",""))
-        keyword_text = rec.get("keywordText","")
-        match_type = rec.get("matchType","")
+        campaign_id = str(rec.get("campaignId", ""))
+        campaign_name = rec.get("campaignName", "")
+        ad_group_id = str(rec.get("adGroupId", ""))
+        ad_group_name = rec.get("adGroupName", "")
+        keyword_id = str(rec.get("keywordId", ""))
+        keyword_text = rec.get("keywordText", "")
+        match_type = rec.get("matchType", "")
 
         impressions = int(rec.get("impressions", 0) or 0)
         clicks = int(rec.get("clicks", 0) or 0)
@@ -380,7 +392,7 @@ else:
         rows_out.append(KeywordRow(
             run_id=run_id,
             pulled_at=pulled_at,
-            marketplace="",  # Amazon doesn't return this in the report; we can map via profile later
+            marketplace="",  # can enrich later from profile
             campaign_id=campaign_id,
             campaign_name=campaign_name,
             ad_group_id=ad_group_id,
@@ -389,7 +401,7 @@ else:
             keyword_id=keyword_id,
             keyword_text=keyword_text,
             match_type=match_type,
-            bid=0.0,  # report payload usually doesn't include live bid; we'll enrich later if needed
+            bid=0.0,  # not provided by this report; optional enrichment later
             lookback_days=lookback_days,
             buffer_days=buffer_days,
             metrics=Metrics(
@@ -401,12 +413,11 @@ else:
                 cpc=cpc,
                 ctr=ctr,
                 acos=acos,
-                roas=roas
-            )
+                roas=roas,
+            ),
         ))
         count += 1
         if count >= limit:
             break
 
     return rows_out
-
