@@ -224,3 +224,173 @@ def amzn_profiles():
         )
         pr.raise_for_status()
         return pr.json()
+
+import io, gzip, datetime
+from fastapi.responses import JSONResponse
+
+def _get_access_token_from_refresh() -> str:
+    client_id = _env("AMZN_CLIENT_ID")
+    client_secret = _env("AMZN_CLIENT_SECRET")
+    refresh_token = _env("AMZN_REFRESH_TOKEN")
+    token_url = "https://api.amazon.com/auth/o2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+    with httpx.Client(timeout=60) as client:
+        r = client.post(token_url, data=data)
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail={"stage":"refresh_token_exchange","status":e.response.status_code,"body":e.response.text})
+        return r.json()["access_token"]
+
+def _ads_headers(access_token: str) -> dict:
+    client_id = _env("AMZN_CLIENT_ID")
+    profile_id = _env("AMZN_PROFILE_ID")
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Amazon-Advertising-API-ClientId": client_id,
+        "Amazon-Advertising-API-Scope": profile_id,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+def _yyyymmdd(d: datetime.date) -> str:
+    return d.strftime("%Y%m%d")
+
+@app.get("/api/sp/keywords_live", response_model=List[KeywordRow])
+def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int = 1000):
+    """Pull real Sponsored Products Keyword performance via Reports v3 and map to our table shape."""
+    # 1) dates with attribution buffer
+    end_date = datetime.date.today() - datetime.timedelta(days=max(0, buffer_days))
+    start_date = end_date - datetime.timedelta(days=max(1, lookback_days) - 1)
+
+    # 2) tokens/headers/region
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+
+    # 3) create report job (Reports v3)
+    # Report type names in v3 use "spKeyword" (keywords) with DAILY time unit.
+    create_body = {
+        "name": f"spKeyword_{_yyyymmdd(start_date)}_{_yyyymmdd(end_date)}",
+        "startDate": _yyyymmdd(start_date),
+        "endDate": _yyyymmdd(end_date),
+        "timeUnit": "DAILY",
+        "format": "GZIP_JSON",
+        "reportType": "spKeyword",
+        # columns to include; adjust later once we see your account's exact payload
+        "columns": [
+            "campaignId","campaignName",
+            "adGroupId","adGroupName",
+            "keywordId","keywordText","matchType",
+            "impressions","clicks","cost",
+            "attributedSales14d","attributedConversions14d"
+        ],
+    }
+
+    with httpx.Client(timeout=60) as client:
+        cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
+        if cr.status_code >= 400:
+            return JSONResponse(status_code=502, content={"stage":"create_report","status":cr.status_code,"body":cr.text,"endpoint":f"{ads_base}/reporting/reports","payload":create_body})
+        report_id = cr.json().get("reportId")
+
+    if not report_id:
+        raise HTTPException(status_code=502, detail={"stage":"create_report","error":"No reportId in response","body":cr.text})
+
+    # 4) poll until status=SUCCESS (small backoff)
+    status_url = f"{ads_base}/reporting/reports/{report_id}"
+    with httpx.Client(timeout=60) as client:
+        for _ in range(30):  # ~30 * 2s = ~60s
+            sr = client.get(status_url, headers=headers)
+            if sr.status_code >= 400:
+                return JSONResponse(status_code=502, content={"stage":"check_report","status":sr.status_code,"body":sr.text,"url":status_url})
+            s = sr.json()
+            if s.get("status") == "SUCCESS" and s.get("url"):
+                download_url = s["url"]
+                break
+            if s.get("status") in {"FAILURE","CANCELLED"}:
+                return JSONResponse(status_code=502, content={"stage":"check_report","status":"FAILED","body":s})
+            import time; time.sleep(2)
+        else:
+            return JSONResponse(status_code=504, content={"stage":"check_report","status":"TIMEOUT"})
+
+    # 5) download and parse GZIP JSON lines
+    with httpx.Client(timeout=120) as client:
+        dr = client.get(download_url, headers=headers)
+        if dr.status_code >= 400:
+            return JSONResponse(status_code=502, content={"stage":"download","status":dr.status_code,"body":dr.text})
+        buf = io.BytesIO(dr.content)
+        with gzip.GzipFile(fileobj=buf) as gz:
+            raw = gz.read().decode("utf-8")
+
+    # Each line is a JSON object (NDJSON)
+    rows_out: List[KeywordRow] = []
+    run_id = str(uuid.uuid4())
+    pulled_at = datetime.date.today()
+    count = 0
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+
+        # Safe fetches with defaults
+        campaign_id = str(rec.get("campaignId",""))
+        campaign_name = rec.get("campaignName","")
+        ad_group_id = str(rec.get("adGroupId",""))
+        ad_group_name = rec.get("adGroupName","")
+        keyword_id = str(rec.get("keywordId",""))
+        keyword_text = rec.get("keywordText","")
+        match_type = rec.get("matchType","")
+
+        impressions = int(rec.get("impressions", 0) or 0)
+        clicks = int(rec.get("clicks", 0) or 0)
+        cost = float(rec.get("cost", 0.0) or 0.0)
+        sales = float(rec.get("attributedSales14d", 0.0) or 0.0)
+        orders = int(rec.get("attributedConversions14d", 0) or 0)
+
+        cpc = round(cost / clicks, 4) if clicks else 0.0
+        ctr = round(clicks / impressions, 4) if impressions else 0.0
+        acos = round(cost / sales, 4) if sales else 0.0
+        roas = round(sales / cost, 4) if cost else 0.0
+
+        rows_out.append(KeywordRow(
+            run_id=run_id,
+            pulled_at=pulled_at,
+            marketplace="",  # Amazon doesn't return this in the report; we can map via profile later
+            campaign_id=campaign_id,
+            campaign_name=campaign_name,
+            ad_group_id=ad_group_id,
+            ad_group_name=ad_group_name,
+            entity_type="keyword",
+            keyword_id=keyword_id,
+            keyword_text=keyword_text,
+            match_type=match_type,
+            bid=0.0,  # report payload usually doesn't include live bid; we'll enrich later if needed
+            lookback_days=lookback_days,
+            buffer_days=buffer_days,
+            metrics=Metrics(
+                impressions=impressions,
+                clicks=clicks,
+                spend=round(cost, 4),
+                sales=round(sales, 4),
+                orders=orders,
+                cpc=cpc,
+                ctr=ctr,
+                acos=acos,
+                roas=roas
+            )
+        ))
+        count += 1
+        if count >= limit:
+            break
+
+    return rows_out
+
