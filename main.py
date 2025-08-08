@@ -258,8 +258,8 @@ def _ads_headers(access_token: str) -> dict:
         "Accept": "application/json",
     }
 
-def _yyyymmdd(d: datetime.date) -> str:
-    return d.strftime("%Y%m%d")
+def _ymd(d: datetime.date) -> str:
+    return d.strftime("%Y-%m-%d")
 
 @app.get("/api/sp/keywords_live", response_model=List[KeywordRow])
 def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int = 1000):
@@ -277,13 +277,14 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
     # 3) create report job (Reports v3)
     # Report type names in v3 use "spKeyword" (keywords) with DAILY time unit.
     create_body = {
-        "name": f"spKeyword_{_yyyymmdd(start_date)}_{_yyyymmdd(end_date)}",
-        "startDate": _yyyymmdd(start_date),
-        "endDate": _yyyymmdd(end_date),
-        "timeUnit": "DAILY",
-        "format": "GZIP_JSON",
-        "reportType": "spKeyword",
-        # columns to include; adjust later once we see your account's exact payload
+    "name": f"spKeywords_{_ymd(start_date)}_{_ymd(end_date)}",
+    "startDate": _ymd(start_date),          # <-- YYYY-MM-DD
+    "endDate": _ymd(end_date),              # <-- YYYY-MM-DD
+    "timeUnit": "DAILY",
+    "reportTypeId": "spKeywords",           # v3 report type id
+    "configuration": {
+        "adProduct": "SPONSORED_PRODUCTS",
+        "groupBy": ["campaign", "adGroup", "keyword"],
         "columns": [
             "campaignId","campaignName",
             "adGroupId","adGroupName",
@@ -291,7 +292,9 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
             "impressions","clicks","cost",
             "attributedSales14d","attributedConversions14d"
         ],
+        "format": "GZIP_JSON"
     }
+}
 
     with httpx.Client(timeout=60) as client:
         cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
