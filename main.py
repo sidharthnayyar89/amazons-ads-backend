@@ -132,11 +132,11 @@ def _env(name: str) -> str:
 def amzn_oauth_start():
     client_id = _env("AMZN_CLIENT_ID")
     redirect_uri = "https://amazons-ads-backend.onrender.com/api/amzn/oauth/callback"
-    scope = "advertising::campaign_management"
+   scope = "cpc_advertising:campaign_management"
     # LWA authorize URL
     params = {
         "client_id": client_id,
-        scope = "cpc_advertising:campaign_management",
+       "scope": scope,
         "response_type": "code",
         "redirect_uri": redirect_uri,
     }
