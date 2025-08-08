@@ -98,3 +98,13 @@ def get_sp_keywords(
     limit: int = 200,
 ):
     return _mock_pull_sp_keywords(marketplace, lookback_days, buffer_days, limit)
+
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from fastapi import Request
+
+templates = Jinja2Templates(directory="templates")
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
