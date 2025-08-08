@@ -318,9 +318,22 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
                 break
             if s.get("status") in {"FAILURE","CANCELLED"}:
                 return JSONResponse(status_code=502, content={"stage":"check_report","status":"FAILED","body":s})
-            import time; time.sleep(2)
-        else:
-            return JSONResponse(status_code=504, content={"stage":"check_report","status":"TIMEOUT"})
+            import time
+wait_seconds = int(os.environ.get("AMZN_REPORT_WAIT_SECONDS", "300"))  # default 5 min
+deadline = time.time() + wait_seconds
+while time.time() < deadline:
+    sr = client.get(status_url, headers=headers)
+    if sr.status_code >= 400:
+        return JSONResponse(status_code=502, content={"stage":"check_report","status":sr.status_code,"body":sr.text,"url":status_url})
+    s = sr.json()
+    if s.get("status") == "SUCCESS" and s.get("url"):
+        download_url = s["url"]; break
+    if s.get("status") in {"FAILURE","CANCELLED"}:
+        return JSONResponse(status_code=502, content={"stage":"check_report","status":"FAILED","body":s})
+    time.sleep(3)  # gentle backoff
+else:
+    return JSONResponse(status_code=504, content={"stage":"check_report","status":"TIMEOUT","url":status_url})
+
 
     # 5) download and parse GZIP JSON lines
     with httpx.Client(timeout=120) as client:
