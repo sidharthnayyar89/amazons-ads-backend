@@ -136,7 +136,7 @@ def amzn_oauth_start():
     # LWA authorize URL
     params = {
         "client_id": client_id,
-        "scope": scope,
+        scope = "cpc_advertising:campaign_management",
         "response_type": "code",
         "redirect_uri": redirect_uri,
     }
