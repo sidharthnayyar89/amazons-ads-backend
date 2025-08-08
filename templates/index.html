@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Amazon Ads — Keywords</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, Arial; padding: 24px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: 8px 10px; border-top: 1px solid #eee; text-align: right; }
+    th:nth-child(1), td:nth-child(1),
+    th:nth-child(2), td:nth-child(2),
+    th:nth-child(3), td:nth-child(3) { text-align: left; }
+    thead th { background: #fafafa; }
+    .controls { display: grid; grid-template-columns: repeat(4,minmax(0,220px)); gap: 8px; margin-bottom: 12px; }
+    .muted { color: #666; font-size: 12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Amazon Ads — Pull Data</h1>
+
+  <div class="controls">
+    <input id="q" placeholder="Search campaign/ad group/keyword" />
+    <select id="marketplace"><option>IN</option><option>US</option><option>UK</option></select>
+    <input id="lookback" type="number" min="1" max="60" value="14" />
+    <input id="buffer" type="number" min="0" max="7" value="1" />
+  </div>
+
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th>Campaign</th><th>Ad Group</th><th>Keyword</th><th>Match</th><th>Bid</th>
+        <th>Clicks</th><th>Impr</th><th>Spend</th><th>Sales</th><th>Orders</th>
+        <th>CTR</th><th>CPC</th><th>ACOS</th><th>ROAS</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div class="muted" id="count"></div>
+
+  <script>
+    const $ = (s)=>document.querySelector(s);
+    const fmt = (n)=>Number(n).toLocaleString();
+
+    async function load(){
+      const m = $('#marketplace').value;
+      const lb = $('#lookback').value;
+      const bf = $('#buffer').value;
+      const res = await fetch(`/api/sp/keywords?marketplace=${m}&lookback_days=${lb}&buffer_days=${bf}&limit=500`);
+      if(!res.ok){ alert('API error '+res.status); return; }
+      const rows = await res.json();
+
+      const needle = $('#q').value.trim().toLowerCase();
+      const filtered = needle ? rows.filter(r =>
+        r.campaign_name.toLowerCase().includes(needle) ||
+        r.ad_group_name.toLowerCase().includes(needle) ||
+        r.keyword_text.toLowerCase().includes(needle)
+      ) : rows;
+
+      const tbody = $('#tbl tbody'); tbody.innerHTML = '';
+      for(const r of filtered){
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.campaign_name}</td>
+          <td>${r.ad_group_name}</td>
+          <td>${r.keyword_text}</td>
+          <td>${r.match_type}</td>
+          <td>${r.bid.toFixed(2)}</td>
+          <td>${fmt(r.metrics.clicks)}</td>
+          <td>${fmt(r.metrics.impressions)}</td>
+          <td>₹${r.metrics.spend.toFixed(2)}</td>
+          <td>₹${r.metrics.sales.toFixed(2)}</td>
+          <td>${fmt(r.metrics.orders)}</td>
+          <td>${(r.metrics.ctr*100).toFixed(2)}%</td>
+          <td>₹${r.metrics.cpc.toFixed(2)}</td>
+          <td>${(r.metrics.acos*100).toFixed(2)}%</td>
+          <td>${r.metrics.roas.toFixed(2)}x</td>
+        `;
+        tbody.appendChild(tr);
+      }
+      $('#count').textContent = `${filtered.length} rows`;
+    }
+
+    // Hook up controls
+    $('#q').addEventListener('input', load);
+    $('#marketplace').addEventListener('change', load);
+    $('#lookback').addEventListener('change', load);
+    $('#buffer').addEventListener('change', load);
+
+    // First load
+    load();
+  </script>
+</body>
+</html>
