@@ -590,8 +590,11 @@ def sp_keywords_fetch(report_id: str, limit: int = 500):
             return JSONResponse(status_code=202, content=s)
         download_url = s["url"]
 
-    # 2) download the gzip file  — IMPORTANT: no Authorization header for S3 presigned URLs
-        dr = client.get(url)  # <— no headers!
+    # 2) download the gzip file — IMPORTANT: no Authorization header for S3 presigned URLs
+        # Use a FRESH client with empty default headers, and also pass empty headers on the call.
+        with httpx.Client(timeout=120, headers={}, trust_env=False) as dl:
+            dr = dl.get(url, headers={})  # absolutely no auth headers
+
         try:
             dr.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -599,6 +602,7 @@ def sp_keywords_fetch(report_id: str, limit: int = 500):
                 status_code=502,
                 detail={"stage": "download", "status": e.response.status_code, "body": e.response.text},
             )
+
         buf = io.BytesIO(dr.content)
         try:
             with gzip.GzipFile(fileobj=buf) as gz:
