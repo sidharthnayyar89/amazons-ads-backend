@@ -989,24 +989,31 @@ def sp_keywords_range(start: str, end: str, limit: int = 1000):
 
     out: List[KeywordRow] = []
     for r in rows:
+        pulled_at_val = r["pulled_at"]
+        # handle timestamptz or date
+        try:
+            pulled_at_date = pulled_at_val.date()  # if it's a datetime
+        except AttributeError:
+            pulled_at_date = pulled_at_val        # it's already a date
+
         out.append(KeywordRow(
-            run_id=r["run_id"],
-            pulled_at=r["pulled_at"].date(),
-            marketplace="",
-            campaign_id=r["campaign_id"],
+            run_id=str(r["run_id"]),
+            pulled_at=pulled_at_date,
+            marketplace="",  # (optional) enrich later
+            campaign_id=str(r["campaign_id"]),
             campaign_name=r["campaign_name"],
-            ad_group_id=r["ad_group_id"],
+            ad_group_id=str(r["ad_group_id"]),
             ad_group_name=r["ad_group_name"],
             entity_type="keyword",
-            keyword_id=r["keyword_id"],
+            keyword_id=str(r["keyword_id"]),
             keyword_text=r["keyword_text"],
             match_type=r["match_type"],
-            bid=0.0,
-            lookback_days=0,
-            buffer_days=0,
+            bid=0.0,            # not in this report
+            lookback_days=0,    # not needed for stored rows
+            buffer_days=0,      # not needed for stored rows
             metrics=Metrics(
-                impressions=r["impressions"],
-                clicks=r["clicks"],
+                impressions=int(r["impressions"]),
+                clicks=int(r["clicks"]),
                 spend=float(r["cost"]),
                 sales=float(r["attributed_sales_14d"]),
                 orders=int(r["attributed_conversions_14d"]),
@@ -1017,5 +1024,3 @@ def sp_keywords_range(start: str, end: str, limit: int = 1000):
             )
         ))
     return out
-
-
