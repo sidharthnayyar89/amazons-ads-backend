@@ -1058,3 +1058,173 @@ def sp_counts():
         })
     return out
 
+# -------------------------------
+# PERMANENT INGEST: fetch & upsert
+# -------------------------------
+from fastapi import Body
+
+@app.post("/api/sp/keywords_fetch")
+def sp_keywords_fetch(
+    report_id: str = Query(..., description="Amazon Reports v3 reportId"),
+    limit: int = Query(5000, ge=1, le=200000)
+):
+    """
+    Fetches a COMPLETED Amazon report by report_id, downloads the gzip JSON lines,
+    parses rows, and upserts into fact_sp_keyword_daily.
+    Returns inserted/updated counts.
+    """
+    import io, gzip, json as _json, uuid as _uuid
+
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    # 1) auth + region + headers
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    # 2) get report metadata to obtain the download URL
+    status_url = f"{ads_base}/reporting/reports/{report_id}"
+    with httpx.Client(timeout=120) as client:
+        sr = client.get(status_url, headers=headers)
+        try:
+            sr.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={"stage": "check_report", "status": e.response.status_code, "body": e.response.text},
+            )
+        meta = sr.json()
+        st = meta.get("status")
+        url = meta.get("url")
+        if st not in ("SUCCESS", "COMPLETED") or not url:
+            # 409 = not ready yet
+            return JSONResponse(status_code=409, content={"stage": "check_report", "status": st, "meta": meta})
+
+        # 3) download the gzip file
+        dr = client.get(url, headers=headers)
+        try:
+            dr.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={"stage": "download", "status": e.response.status_code, "body": e.response.text},
+            )
+        buf = io.BytesIO(dr.content)
+        try:
+            with gzip.GzipFile(fileobj=buf) as gz:
+                raw = gz.read().decode("utf-8")
+        except OSError:
+            # some edge cases: file might not be gzipped (rare), try plain decode
+            raw = dr.content.decode("utf-8", errors="ignore")
+
+    # 4) iterate NDJSON lines (fallback: try whole JSON array)
+    def iter_records(text: str):
+        # NDJSON path
+        any_yield = False
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            any_yield = True
+            yield _json.loads(line)
+        if not any_yield:
+            # fallback: whole JSON
+            try:
+                arr = _json.loads(text)
+                if isinstance(arr, list):
+                    for obj in arr:
+                        yield obj
+            except Exception:
+                pass
+
+    # 5) upsert
+    pid = _env("AMZN_PROFILE_ID")
+    run_id = str(_uuid.uuid4())
+    inserted = updated = processed = 0
+
+    upsert_sql = text("""
+        INSERT INTO fact_sp_keyword_daily (
+            profile_id, date, keyword_id,
+            campaign_id, campaign_name, ad_group_id, ad_group_name,
+            keyword_text, match_type,
+            impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+            cpc, ctr, acos, roas,
+            run_id
+        )
+        VALUES (
+            :profile_id, :date, :keyword_id,
+            :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+            :keyword_text, :match_type,
+            :impressions, :clicks, :cost, :sales, :orders,
+            :cpc, :ctr, :acos, :roas,
+            :run_id
+        )
+        ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
+            campaign_id = EXCLUDED.campaign_id,
+            campaign_name = EXCLUDED.campaign_name,
+            ad_group_id = EXCLUDED.ad_group_id,
+            ad_group_name = EXCLUDED.ad_group_name,
+            keyword_text = EXCLUDED.keyword_text,
+            match_type = EXCLUDED.match_type,
+            impressions = EXCLUDED.impressions,
+            clicks = EXCLUDED.clicks,
+            cost = EXCLUDED.cost,
+            attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+            attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+            cpc = EXCLUDED.cpc,
+            ctr = EXCLUDED.ctr,
+            acos = EXCLUDED.acos,
+            roas = EXCLUDED.roas,
+            run_id = EXCLUDED.run_id,
+            pulled_at = now()
+        RETURNING xmax = 0 AS inserted_flag
+    """)
+
+    with engine.begin() as conn:
+        for rec in iter_records(raw):
+            # map & sanitize
+            d = {
+                "profile_id": pid,
+                "date": (rec.get("date") or rec.get("reportDate") or "")[:10],  # YYYY-MM-DD
+                "campaign_id": str(rec.get("campaignId", "") or ""),
+                "campaign_name": rec.get("campaignName", "") or "",
+                "ad_group_id": str(rec.get("adGroupId", "") or ""),
+                "ad_group_name": rec.get("adGroupName", "") or "",
+                "keyword_id": str(rec.get("keywordId", "") or "0"),  # never null for PK
+                "keyword_text": rec.get("keywordText", "") or "",
+                "match_type": rec.get("matchType", "") or "",
+                "impressions": int(rec.get("impressions", 0) or 0),
+                "clicks": int(rec.get("clicks", 0) or 0),
+                "cost": float(rec.get("cost", 0.0) or 0.0),
+                "sales": float(rec.get("attributedSales14d", 0.0) or 0.0),
+                "orders": int(rec.get("attributedConversions14d", 0) or 0),
+            }
+            # derived
+            d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
+            d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
+            d["acos"] = round(d["cost"] / d["sales"], 6) if d["sales"] else 0.0
+            d["roas"] = round(d["sales"] / d["cost"], 6) if d["cost"] else 0.0
+            d["run_id"] = run_id
+
+            # skip bad/no-date rows
+            if not d["date"]:
+                continue
+
+            res = conn.execute(upsert_sql, d).first()
+            if res and res[0] is True:
+                inserted += 1
+            else:
+                updated += 1
+
+            processed += 1
+            if processed >= limit:
+                break
+
+    return {
+        "report_id": report_id,
+        "processed": processed,
+        "inserted": inserted,
+        "updated": updated
+    }
