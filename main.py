@@ -10,6 +10,50 @@ import urllib.parse
 import json
 import httpx
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import create_engine, text
+DB_URL = os.environ.get("DATABASE_URL")
+engine = create_engine(DB_URL, pool_pre_ping=True) if DB_URL else None
+
+def init_db():
+    if not engine:
+        return
+    ddl = """
+    CREATE TABLE IF NOT EXISTS fact_sp_keyword_daily (
+      profile_id     text NOT NULL,
+      date           date NOT NULL,
+      keyword_id     text NOT NULL,
+
+      campaign_id    text NOT NULL,
+      campaign_name  text NOT NULL,
+      ad_group_id    text NOT NULL,
+      ad_group_name  text NOT NULL,
+      keyword_text   text NOT NULL,
+      match_type     text NOT NULL,
+
+      impressions    integer NOT NULL,
+      clicks         integer NOT NULL,
+      cost           numeric(18,4) NOT NULL,
+      attributed_sales_14d numeric(18,4) NOT NULL,
+      attributed_conversions_14d integer NOT NULL,
+
+      -- derived
+      cpc            numeric(18,4) NOT NULL,
+      ctr            numeric(18,6) NOT NULL,
+      acos           numeric(18,6) NOT NULL,
+      roas           numeric(18,6) NOT NULL,
+
+      run_id         uuid NOT NULL,
+      pulled_at      timestamptz NOT NULL DEFAULT now(),
+
+      CONSTRAINT uq_fact UNIQUE(profile_id, date, keyword_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fact_profile_date ON fact_sp_keyword_daily(profile_id, date);
+    CREATE INDEX IF NOT EXISTS idx_fact_keyword_date ON fact_sp_keyword_daily(keyword_id, date);
+    """
+    with engine.begin() as conn:
+        conn.exec_driver_sql(ddl)
+
+init_db()
 
 # ======================================================
 # APP SETUP
