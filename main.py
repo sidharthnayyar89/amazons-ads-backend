@@ -593,7 +593,7 @@ def sp_keywords_fetch(report_id: str, limit: int = 500):
     # 2) download the gzip file — IMPORTANT: no Authorization header for S3 presigned URLs
         # Use a FRESH client with empty default headers, and also pass empty headers on the call.
         with httpx.Client(timeout=120, headers={}, trust_env=False) as dl:
-            dr = dl.get(url, headers={})  # absolutely no auth headers
+            dr = dl.get(download_url, headers={})  # absolutely no auth headers
 
         try:
             dr.raise_for_status()
@@ -1072,32 +1072,25 @@ def sp_counts():
     return out
 
 # -------------------------------
-# PERMANENT INGEST: fetch & upsert
+# PERMANENT INGEST: fetch & upsert (headerless S3 download)
 # -------------------------------
-from fastapi import Body
+from fastapi import Query
+import io, gzip, json as _json, uuid as _uuid, urllib.request
 
 @app.post("/api/sp/keywords_fetch")
 def sp_keywords_fetch(
     report_id: str = Query(..., description="Amazon Reports v3 reportId"),
     limit: int = Query(5000, ge=1, le=200000)
 ):
-    """
-    Fetches a COMPLETED Amazon report by report_id, downloads the gzip JSON lines,
-    parses rows, and upserts into fact_sp_keyword_daily.
-    Returns inserted/updated counts.
-    """
-    import io, gzip, json as _json, uuid as _uuid
-
     if not engine:
         raise HTTPException(status_code=500, detail="Database not configured")
 
-    # 1) auth + region + headers
+    # 1) get report meta from Ads API (needs auth)
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
     region = os.environ.get("AMZN_REGION", "NA").upper()
     ads_base = _ads_base(region)
 
-    # 2) get report metadata to obtain the download URL
     status_url = f"{ads_base}/reporting/reports/{report_id}"
     with httpx.Client(timeout=120) as client:
         sr = client.get(status_url, headers=headers)
@@ -1112,29 +1105,28 @@ def sp_keywords_fetch(
         st = meta.get("status")
         url = meta.get("url")
         if st not in ("SUCCESS", "COMPLETED") or not url:
-            # 409 = not ready yet
             return JSONResponse(status_code=409, content={"stage": "check_report", "status": st, "meta": meta})
 
-        # 3) download the gzip file
-        dr = client.get(url, headers=headers)
-        try:
-            dr.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=502,
-                detail={"stage": "download", "status": e.response.status_code, "body": e.response.text},
-            )
-        buf = io.BytesIO(dr.content)
-        try:
-            with gzip.GzipFile(fileobj=buf) as gz:
-                raw = gz.read().decode("utf-8")
-        except OSError:
-            # some edge cases: file might not be gzipped (rare), try plain decode
-            raw = dr.content.decode("utf-8", errors="ignore")
+    # 2) download presigned S3 URL with ZERO headers
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            raw_bytes = resp.read()
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"stage": "download", "status": 400, "body": f"urllib error: {e!r}"},
+        )
 
-    # 4) iterate NDJSON lines (fallback: try whole JSON array)
+    # 3) gunzip (or fallback to plain)
+    try:
+        buf = io.BytesIO(raw_bytes)
+        with gzip.GzipFile(fileobj=buf) as gz:
+            raw_text = gz.read().decode("utf-8")
+    except OSError:
+        raw_text = raw_bytes.decode("utf-8", errors="ignore")
+
+    # 4) iterate records (NDJSON or JSON array)
     def iter_records(text: str):
-        # NDJSON path
         any_yield = False
         for line in text.splitlines():
             line = line.strip()
@@ -1143,7 +1135,6 @@ def sp_keywords_fetch(
             any_yield = True
             yield _json.loads(line)
         if not any_yield:
-            # fallback: whole JSON
             try:
                 arr = _json.loads(text)
                 if isinstance(arr, list):
@@ -1196,16 +1187,15 @@ def sp_keywords_fetch(
     """)
 
     with engine.begin() as conn:
-        for rec in iter_records(raw):
-            # map & sanitize
+        for rec in iter_records(raw_text):
             d = {
                 "profile_id": pid,
-                "date": (rec.get("date") or rec.get("reportDate") or "")[:10],  # YYYY-MM-DD
+                "date": (rec.get("date") or rec.get("reportDate") or "")[:10],
                 "campaign_id": str(rec.get("campaignId", "") or ""),
                 "campaign_name": rec.get("campaignName", "") or "",
                 "ad_group_id": str(rec.get("adGroupId", "") or ""),
                 "ad_group_name": rec.get("adGroupName", "") or "",
-                "keyword_id": str(rec.get("keywordId", "") or "0"),  # never null for PK
+                "keyword_id": str(rec.get("keywordId", "") or "0"),
                 "keyword_text": rec.get("keywordText", "") or "",
                 "match_type": rec.get("matchType", "") or "",
                 "impressions": int(rec.get("impressions", 0) or 0),
@@ -1214,16 +1204,13 @@ def sp_keywords_fetch(
                 "sales": float(rec.get("attributedSales14d", 0.0) or 0.0),
                 "orders": int(rec.get("attributedConversions14d", 0) or 0),
             }
-            # derived
+            if not d["date"]:
+                continue
             d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
             d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
             d["acos"] = round(d["cost"] / d["sales"], 6) if d["sales"] else 0.0
             d["roas"] = round(d["sales"] / d["cost"], 6) if d["cost"] else 0.0
             d["run_id"] = run_id
-
-            # skip bad/no-date rows
-            if not d["date"]:
-                continue
 
             res = conn.execute(upsert_sql, d).first()
             if res and res[0] is True:
@@ -1235,9 +1222,4 @@ def sp_keywords_fetch(
             if processed >= limit:
                 break
 
-    return {
-        "report_id": report_id,
-        "processed": processed,
-        "inserted": inserted,
-        "updated": updated
-    }
+    return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
