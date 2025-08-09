@@ -12,6 +12,14 @@ import httpx
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine, text
 DB_URL = os.environ.get("DATABASE_URL")
+
+# Force SQLAlchemy to use psycopg3 driver if a plain URL was provided
+if DB_URL:
+    if DB_URL.startswith("postgres://"):
+        DB_URL = DB_URL.replace("postgres://", "postgresql+psycopg://", 1)
+    elif DB_URL.startswith("postgresql://") and "+psycopg" not in DB_URL:
+        DB_URL = DB_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
 engine = create_engine(DB_URL, pool_pre_ping=True) if DB_URL else None
 
 def init_db():
