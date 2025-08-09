@@ -1,4 +1,5 @@
 from datetime import date
+from datetime import timedelta
 from typing import List
 from fastapi import FastAPI, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -487,3 +488,66 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
             break
 
     return rows_out
+
+from datetime import timedelta
+
+@app.post("/api/sp/keywords_start")
+def sp_keywords_start(lookback_days: int = 2):
+    """
+    Create a Sponsored Products Keywords DAILY report for the last `lookback_days`
+    (ending yesterday). Returns a report_id immediately.
+    """
+    import re
+
+    # 1) date range (ending yesterday, no buffer)
+    end_date = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=max(1, lookback_days) - 1)
+
+    # 2) auth/region
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    def _ymd(d: date) -> str:
+        return d.strftime("%Y-%m-%d")
+
+    # 3) report payload (includes "date" column)
+    create_body = {
+        "name": f"spKeywords_{_ymd(start_date)}_{_ymd(end_date)}",
+        "startDate": _ymd(start_date),
+        "endDate": _ymd(end_date),
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "reportTypeId": "spKeywords",
+            "timeUnit": "DAILY",
+            "groupBy": ["adGroup"],  # only adGroup allowed for this report
+            "columns": [
+                "date",
+                "campaignId","campaignName",
+                "adGroupId","adGroupName",
+                "keywordId","keywordText","matchType",
+                "impressions","clicks","cost",
+                "attributedSales14d","attributedConversions14d"
+            ],
+            "format": "GZIP_JSON"
+        }
+    }
+
+    # 4) call create; handle duplicate (HTTP 425)
+    with httpx.Client(timeout=60) as client:
+        cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
+
+    if 200 <= cr.status_code < 300:
+        return {"report_id": cr.json().get("reportId")}
+
+    if cr.status_code == 425:
+        # detail looks like: "The Request is a duplicate of : <uuid>"
+        try:
+            rid = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail","")).group(1)
+            return {"report_id": rid, "duplicate": True}
+        except Exception:
+            pass
+
+    # otherwise bubble up the error
+    raise HTTPException(status_code=cr.status_code, detail=cr.text)
