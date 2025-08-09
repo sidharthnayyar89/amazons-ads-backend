@@ -1033,3 +1033,28 @@ def sp_keywords_range(start: str, end: str, limit: int = 1000):
             )
         ))
     return out
+
+@app.get("/api/debug/sp_counts")
+def sp_counts():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    pid = _env("AMZN_PROFILE_ID")
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT date, COUNT(*) AS rows, SUM(clicks) AS clicks, SUM(cost) AS cost
+            FROM fact_sp_keyword_daily
+            WHERE profile_id = :pid
+            GROUP BY date
+            ORDER BY date DESC
+            LIMIT 10
+        """), {"pid": pid}).mappings().all()
+    out = []
+    for r in rows:
+        out.append({
+            "date": r["date"].isoformat(),
+            "rows": int(r["rows"]),
+            "clicks": int(r["clicks"]) if r["clicks"] else 0,
+            "cost": float(r["cost"]) if r["cost"] else 0.0,
+        })
+    return out
+
