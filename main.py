@@ -590,13 +590,22 @@ def sp_keywords_fetch(report_id: str, limit: int = 500):
             return JSONResponse(status_code=202, content=s)
         download_url = s["url"]
 
-        # 2) download gzip NDJSON
-        dr = client.get(download_url, headers=headers)
-        if dr.status_code >= 400:
-            return JSONResponse(status_code=502, content={"stage":"download","status":dr.status_code,"body":dr.text})
+    # 2) download the gzip file  — IMPORTANT: no Authorization header for S3 presigned URLs
+        dr = client.get(url)  # <— no headers!
+        try:
+            dr.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={"stage": "download", "status": e.response.status_code, "body": e.response.text},
+            )
         buf = io.BytesIO(dr.content)
-        with gzip.GzipFile(fileobj=buf) as gz:
-            raw = gz.read().decode("utf-8")
+        try:
+            with gzip.GzipFile(fileobj=buf) as gz:
+                raw = gz.read().decode("utf-8")
+        except OSError:
+            # some edge cases: file might not be gzipped (rare), try plain decode
+            raw = dr.content.decode("utf-8", errors="ignore")
 
     # 3) parse + build API rows and DB rows
     rows_out: List[KeywordRow] = []
