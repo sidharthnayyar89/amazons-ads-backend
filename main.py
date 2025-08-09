@@ -1105,9 +1105,10 @@ def sp_keywords_fetch(
         st = meta.get("status")
         url = meta.get("url")
         if st not in ("SUCCESS", "COMPLETED") or not url:
+            # not ready — let caller poll again later
             return JSONResponse(status_code=409, content={"stage": "check_report", "status": st, "meta": meta})
 
-    # 2) download presigned S3 URL with ZERO headers
+    # 2) download presigned S3 URL with ZERO headers (no Authorization!)
     try:
         with urllib.request.urlopen(url, timeout=120) as resp:
             raw_bytes = resp.read()
@@ -1223,3 +1224,4 @@ def sp_keywords_fetch(
                 break
 
     return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
+
