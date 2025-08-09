@@ -551,3 +551,182 @@ def sp_keywords_start(lookback_days: int = 2):
 
     # otherwise bubble up the error
     raise HTTPException(status_code=cr.status_code, detail=cr.text)
+
+@app.get("/api/sp/report_status")
+def sp_report_status(report_id: str):
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+    url = f"{ads_base}/reporting/reports/{report_id}"
+
+    with httpx.Client(timeout=60) as client:
+        r = client.get(url, headers=headers)
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        return r.json()
+
+@app.get("/api/sp/keywords_fetch", response_model=List[KeywordRow])
+def sp_keywords_fetch(report_id: str, limit: int = 500):
+    import io, gzip, datetime as dt, json as _json
+
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    # 1) get download URL
+    status_url = f"{ads_base}/reporting/reports/{report_id}"
+    with httpx.Client(timeout=60) as client:
+        sr = client.get(status_url, headers=headers)
+        try:
+            sr.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            return JSONResponse(status_code=e.response.status_code, content={"stage":"check_report","body":e.response.text})
+        s = sr.json()
+        if s.get("status") != "SUCCESS" or not s.get("url"):
+            return JSONResponse(status_code=202, content=s)
+        download_url = s["url"]
+
+        # 2) download gzip NDJSON
+        dr = client.get(download_url, headers=headers)
+        if dr.status_code >= 400:
+            return JSONResponse(status_code=502, content={"stage":"download","status":dr.status_code,"body":dr.text})
+        buf = io.BytesIO(dr.content)
+        with gzip.GzipFile(fileobj=buf) as gz:
+            raw = gz.read().decode("utf-8")
+
+    # 3) parse + build API rows and DB rows
+    rows_out: List[KeywordRow] = []
+    to_insert = []
+    run_id = str(uuid.uuid4())
+    pulled_at = dt.date.today()
+    profile_id = _env("AMZN_PROFILE_ID")
+
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        rec = _json.loads(line)
+
+        date_str = rec.get("date")
+        if not date_str:
+            continue
+        the_date = dt.date.fromisoformat(date_str)
+
+        campaign_id = str(rec.get("campaignId",""))
+        campaign_name = rec.get("campaignName","") or ""
+        ad_group_id = str(rec.get("adGroupId",""))
+        ad_group_name = rec.get("adGroupName","") or ""
+        keyword_id = str(rec.get("keywordId",""))
+        keyword_text = rec.get("keywordText","") or ""
+        match_type = rec.get("matchType","") or ""
+
+        impressions = int(rec.get("impressions", 0) or 0)
+        clicks = int(rec.get("clicks", 0) or 0)
+        cost = float(rec.get("cost", 0.0) or 0.0)
+        sales = float(rec.get("attributedSales14d", 0.0) or 0.0)
+        orders = int(rec.get("attributedConversions14d", 0) or 0)
+
+        cpc = round(cost / clicks, 4) if clicks else 0.0
+        ctr = round(clicks / impressions, 6) if impressions else 0.0
+        acos = round(cost / sales, 6) if sales else 0.0
+        roas = round(sales / cost, 6) if cost else 0.0
+
+        rows_out.append(KeywordRow(
+            run_id=run_id,
+            pulled_at=pulled_at,
+            marketplace="",
+            campaign_id=campaign_id,
+            campaign_name=campaign_name,
+            ad_group_id=ad_group_id,
+            ad_group_name=ad_group_name,
+            entity_type="keyword",
+            keyword_id=keyword_id,
+            keyword_text=keyword_text,
+            match_type=match_type,
+            bid=0.0,
+            lookback_days=0,
+            buffer_days=0,
+            metrics=Metrics(
+                impressions=impressions,
+                clicks=clicks,
+                spend=round(cost,4),
+                sales=round(sales,4),
+                orders=orders,
+                cpc=cpc,
+                ctr=ctr,
+                acos=acos,
+                roas=roas,
+            ),
+        ))
+
+        to_insert.append({
+            "profile_id": profile_id,
+            "date": the_date,
+            "keyword_id": keyword_id,
+            "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
+            "ad_group_id": ad_group_id,
+            "ad_group_name": ad_group_name,
+            "keyword_text": keyword_text,
+            "match_type": match_type,
+            "impressions": impressions,
+            "clicks": clicks,
+            "cost": cost,
+            "sales": sales,
+            "orders": orders,
+            "cpc": cpc,
+            "ctr": ctr,
+            "acos": acos,
+            "roas": roas,
+            "run_id": run_id,
+            "pulled_at": pulled_at,
+        })
+
+        if len(to_insert) >= limit:
+            break
+
+    # 4) UPSERT to Postgres
+    if engine and to_insert:
+        sql = """
+        INSERT INTO fact_sp_keyword_daily (
+          profile_id, date, keyword_id,
+          campaign_id, campaign_name, ad_group_id, ad_group_name,
+          keyword_text, match_type,
+          impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+          cpc, ctr, acos, roas,
+          run_id, pulled_at
+        )
+        VALUES (
+          :profile_id, :date, :keyword_id,
+          :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+          :keyword_text, :match_type,
+          :impressions, :clicks, :cost, :sales, :orders,
+          :cpc, :ctr, :acos, :roas,
+          :run_id, :pulled_at
+        )
+        ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
+          campaign_id = EXCLUDED.campaign_id,
+          campaign_name = EXCLUDED.campaign_name,
+          ad_group_id = EXCLUDED.ad_group_id,
+          ad_group_name = EXCLUDED.ad_group_name,
+          keyword_text = EXCLUDED.keyword_text,
+          match_type = EXCLUDED.match_type,
+          impressions = EXCLUDED.impressions,
+          clicks = EXCLUDED.clicks,
+          cost = EXCLUDED.cost,
+          attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+          attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+          cpc = EXCLUDED.cpc,
+          ctr = EXCLUDED.ctr,
+          acos = EXCLUDED.acos,
+          roas = EXCLUDED.roas,
+          run_id = EXCLUDED.run_id,
+          pulled_at = EXCLUDED.pulled_at
+        """
+        with engine.begin() as conn:
+            conn.execute(text(sql), to_insert)
+
+    return rows_out
