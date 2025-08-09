@@ -957,6 +957,8 @@ def sp_keywords_run(lookback_days: int = 2, background_tasks: BackgroundTasks = 
 
     return {"report_id": rid, "status": "PROCESSING", "start": str(start_date), "end": str(end_date)}
 
+from datetime import date as _date
+
 @app.get("/api/sp/keywords_range", response_model=List[KeywordRow])
 def sp_keywords_range(start: str, end: str, limit: int = 1000):
     """
@@ -966,6 +968,13 @@ def sp_keywords_range(start: str, end: str, limit: int = 1000):
     if not engine:
         raise HTTPException(status_code=500, detail="Database not configured")
     profile_id = _env("AMZN_PROFILE_ID")
+
+    # Parse to real dates so we don't need SQL casts
+    try:
+        start_d = _date.fromisoformat(start)
+        end_d = _date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD")
 
     q = """
     SELECT
@@ -977,29 +986,29 @@ def sp_keywords_range(start: str, end: str, limit: int = 1000):
       run_id, pulled_at
     FROM fact_sp_keyword_daily
     WHERE profile_id = :pid
-      AND date >= :start::date
-      AND date <= :end::date
+      AND date >= :start_d
+      AND date <= :end_d
     ORDER BY date DESC, campaign_name, ad_group_name, keyword_text
     LIMIT :lim
     """
     with engine.begin() as conn:
         rows = conn.execute(
-            text(q), {"pid": profile_id, "start": start, "end": end, "lim": limit}
+            text(q),
+            {"pid": profile_id, "start_d": start_d, "end_d": end_d, "lim": limit},
         ).mappings().all()
 
     out: List[KeywordRow] = []
     for r in rows:
-        pulled_at_val = r["pulled_at"]
-        # handle timestamptz or date
+        pa = r["pulled_at"]
         try:
-            pulled_at_date = pulled_at_val.date()  # if it's a datetime
+            pulled_at_date = pa.date()
         except AttributeError:
-            pulled_at_date = pulled_at_val        # it's already a date
+            pulled_at_date = pa
 
         out.append(KeywordRow(
             run_id=str(r["run_id"]),
             pulled_at=pulled_at_date,
-            marketplace="",  # (optional) enrich later
+            marketplace="",
             campaign_id=str(r["campaign_id"]),
             campaign_name=r["campaign_name"],
             ad_group_id=str(r["ad_group_id"]),
@@ -1008,9 +1017,9 @@ def sp_keywords_range(start: str, end: str, limit: int = 1000):
             keyword_id=str(r["keyword_id"]),
             keyword_text=r["keyword_text"],
             match_type=r["match_type"],
-            bid=0.0,            # not in this report
-            lookback_days=0,    # not needed for stored rows
-            buffer_days=0,      # not needed for stored rows
+            bid=0.0,
+            lookback_days=0,
+            buffer_days=0,
             metrics=Metrics(
                 impressions=int(r["impressions"]),
                 clicks=int(r["clicks"]),
