@@ -730,3 +730,230 @@ def sp_keywords_fetch(report_id: str, limit: int = 500):
             conn.execute(text(sql), to_insert)
 
     return rows_out
+
+from fastapi import BackgroundTasks
+
+def _process_report_in_bg(report_id: str):
+    """
+    Runs in the background:
+    - poll /reporting/reports/{id} until SUCCESS (or timeout)
+    - download gzip
+    - parse lines
+    - UPSERT into fact_sp_keyword_daily
+    """
+    import io, gzip, time, datetime as dt, json as _json
+
+    try:
+        access = _get_access_token_from_refresh()
+        headers = _ads_headers(access)
+        region = os.environ.get("AMZN_REGION", "NA").upper()
+        ads_base = _ads_base(region)
+
+        status_url = f"{ads_base}/reporting/reports/{report_id}"
+        max_seconds = int(os.environ.get("AMZN_REPORT_BG_MAX_SECONDS", "900"))  # 15 min
+        deadline = time.time() + max_seconds
+
+        download_url = None
+        with httpx.Client(timeout=60) as client:
+            while time.time() < deadline:
+                sr = client.get(status_url, headers=headers)
+                if sr.status_code >= 400:
+                    print("[report_status_error]", sr.status_code, sr.text)
+                    return
+                s = sr.json()
+                st = s.get("status")
+                if st == "SUCCESS" and s.get("url"):
+                    download_url = s["url"]
+                    break
+                if st in {"FAILURE", "CANCELLED"}:
+                    print("[report_failed]", s)
+                    return
+                time.sleep(20)  # poll every 20s
+
+            if not download_url:
+                print("[report_timeout]", status_url)
+                return
+
+            # download
+            dr = client.get(download_url, headers=headers, timeout=120)
+            if dr.status_code >= 400:
+                print("[report_download_error]", dr.status_code, dr.text)
+                return
+            buf = io.BytesIO(dr.content)
+            with gzip.GzipFile(fileobj=buf) as gz:
+                raw = gz.read().decode("utf-8")
+
+        # parse + upsert
+        if not engine:
+            print("[db_missing] DATABASE_URL not configured")
+            return
+
+        profile_id = _env("AMZN_PROFILE_ID")
+        run_id = str(uuid.uuid4())
+        pulled_at = dt.date.today()
+
+        to_insert = []
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            rec = _json.loads(line)
+
+            # required daily key
+            ds = rec.get("date")
+            if not ds:
+                continue
+            the_date = dt.date.fromisoformat(ds)
+
+            campaign_id = str(rec.get("campaignId",""))
+            campaign_name = rec.get("campaignName","") or ""
+            ad_group_id = str(rec.get("adGroupId",""))
+            ad_group_name = rec.get("adGroupName","") or ""
+            keyword_id = str(rec.get("keywordId",""))
+            keyword_text = rec.get("keywordText","") or ""
+            match_type = rec.get("matchType","") or ""
+
+            impressions = int(rec.get("impressions", 0) or 0)
+            clicks = int(rec.get("clicks", 0) or 0)
+            cost = float(rec.get("cost", 0.0) or 0.0)
+            sales = float(rec.get("attributedSales14d", 0.0) or 0.0)
+            orders = int(rec.get("attributedConversions14d", 0) or 0)
+
+            cpc = round(cost / clicks, 4) if clicks else 0.0
+            ctr = round(clicks / impressions, 6) if impressions else 0.0
+            acos = round(cost / sales, 6) if sales else 0.0
+            roas = round(sales / cost, 6) if cost else 0.0
+
+            to_insert.append({
+                "profile_id": profile_id,
+                "date": the_date,
+                "keyword_id": keyword_id,
+                "campaign_id": campaign_id,
+                "campaign_name": campaign_name,
+                "ad_group_id": ad_group_id,
+                "ad_group_name": ad_group_name,
+                "keyword_text": keyword_text,
+                "match_type": match_type,
+                "impressions": impressions,
+                "clicks": clicks,
+                "cost": cost,
+                "attributed_sales_14d": sales,
+                "attributed_conversions_14d": orders,
+                "cpc": cpc,
+                "ctr": ctr,
+                "acos": acos,
+                "roas": roas,
+                "run_id": run_id,
+                "pulled_at": pulled_at,
+            })
+
+        if to_insert:
+            sql = """
+            INSERT INTO fact_sp_keyword_daily (
+              profile_id, date, keyword_id,
+              campaign_id, campaign_name, ad_group_id, ad_group_name,
+              keyword_text, match_type,
+              impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+              cpc, ctr, acos, roas,
+              run_id, pulled_at
+            )
+            VALUES (
+              :profile_id, :date, :keyword_id,
+              :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+              :keyword_text, :match_type,
+              :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
+              :cpc, :ctr, :acos, :roas,
+              :run_id, :pulled_at
+            )
+            ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
+              campaign_id = EXCLUDED.campaign_id,
+              campaign_name = EXCLUDED.campaign_name,
+              ad_group_id = EXCLUDED.ad_group_id,
+              ad_group_name = EXCLUDED.ad_group_name,
+              keyword_text = EXCLUDED.keyword_text,
+              match_type = EXCLUDED.match_type,
+              impressions = EXCLUDED.impressions,
+              clicks = EXCLUDED.clicks,
+              cost = EXCLUDED.cost,
+              attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+              attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+              cpc = EXCLUDED.cpc,
+              ctr = EXCLUDED.ctr,
+              acos = EXCLUDED.acos,
+              roas = EXCLUDED.roas,
+              run_id = EXCLUDED.run_id,
+              pulled_at = EXCLUDED.pulled_at
+            """
+            with engine.begin() as conn:
+                conn.execute(text(sql), to_insert)
+
+        print(f"[report_done] {report_id} rows={len(to_insert)}")
+
+    except Exception as e:
+        # don’t crash the server; just log
+        import traceback
+        print("[bg_error]", e)
+        traceback.print_exc()
+
+
+@app.post("/api/sp/keywords_run")
+def sp_keywords_run(lookback_days: int = 2, background_tasks: BackgroundTasks = None):
+    """
+    Single call:
+    - create report for the last `lookback_days` (ending yesterday)
+    - start a background task to poll & fetch & store
+    - return immediately with report_id
+    """
+    # 1) compute dates (no buffer)
+    end_date = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=max(1, lookback_days) - 1)
+
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    def _ymd(d: date) -> str:
+        return d.strftime("%Y-%m-%d")
+
+    body = {
+        "name": f"spKeywords_{_ymd(start_date)}_{_ymd(end_date)}",
+        "startDate": _ymd(start_date),
+        "endDate": _ymd(end_date),
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "reportTypeId": "spKeywords",
+            "timeUnit": "DAILY",
+            "groupBy": ["adGroup"],
+            "columns": [
+                "date",
+                "campaignId","campaignName",
+                "adGroupId","adGroupName",
+                "keywordId","keywordText","matchType",
+                "impressions","clicks","cost",
+                "attributedSales14d","attributedConversions14d"
+            ],
+            "format": "GZIP_JSON"
+        }
+    }
+
+    with httpx.Client(timeout=60) as client:
+        cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=body)
+
+    # handle create + duplicate(425)
+    if 200 <= cr.status_code < 300:
+        rid = cr.json().get("reportId")
+    elif cr.status_code == 425:
+        import re
+        try:
+            rid = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail","")).group(1)
+        except Exception:
+            raise HTTPException(status_code=425, detail=cr.text)
+    else:
+        raise HTTPException(status_code=cr.status_code, detail=cr.text)
+
+    # kick background processor
+    if background_tasks is not None:
+        background_tasks.add_task(_process_report_in_bg, rid)
+
+    return {"report_id": rid, "status": "PROCESSING", "start": str(start_date), "end": str(end_date)}
+
