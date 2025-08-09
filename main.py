@@ -957,3 +957,65 @@ def sp_keywords_run(lookback_days: int = 2, background_tasks: BackgroundTasks = 
 
     return {"report_id": rid, "status": "PROCESSING", "start": str(start_date), "end": str(end_date)}
 
+@app.get("/api/sp/keywords_range", response_model=List[KeywordRow])
+def sp_keywords_range(start: str, end: str, limit: int = 1000):
+    """
+    Returns stored keyword-day rows between [start, end] (inclusive).
+    Dates must be YYYY-MM-DD.
+    """
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    profile_id = _env("AMZN_PROFILE_ID")
+
+    q = """
+    SELECT
+      profile_id, date, keyword_id,
+      campaign_id, campaign_name, ad_group_id, ad_group_name,
+      keyword_text, match_type,
+      impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+      cpc, ctr, acos, roas,
+      run_id, pulled_at
+    FROM fact_sp_keyword_daily
+    WHERE profile_id = :pid
+      AND date >= :start::date
+      AND date <= :end::date
+    ORDER BY date DESC, campaign_name, ad_group_name, keyword_text
+    LIMIT :lim
+    """
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(q), {"pid": profile_id, "start": start, "end": end, "lim": limit}
+        ).mappings().all()
+
+    out: List[KeywordRow] = []
+    for r in rows:
+        out.append(KeywordRow(
+            run_id=r["run_id"],
+            pulled_at=r["pulled_at"].date(),
+            marketplace="",
+            campaign_id=r["campaign_id"],
+            campaign_name=r["campaign_name"],
+            ad_group_id=r["ad_group_id"],
+            ad_group_name=r["ad_group_name"],
+            entity_type="keyword",
+            keyword_id=r["keyword_id"],
+            keyword_text=r["keyword_text"],
+            match_type=r["match_type"],
+            bid=0.0,
+            lookback_days=0,
+            buffer_days=0,
+            metrics=Metrics(
+                impressions=r["impressions"],
+                clicks=r["clicks"],
+                spend=float(r["cost"]),
+                sales=float(r["attributed_sales_14d"]),
+                orders=int(r["attributed_conversions_14d"]),
+                cpc=float(r["cpc"]),
+                ctr=float(r["ctr"]),
+                acos=float(r["acos"]),
+                roas=float(r["roas"]),
+            )
+        ))
+    return out
+
+
