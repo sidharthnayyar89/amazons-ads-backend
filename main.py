@@ -201,6 +201,13 @@ def get_sp_keywords(
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
+@app.get("/ads/keywords", response_class=HTMLResponse)
+def ads_keywords(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/ads/search-terms", response_class=HTMLResponse)
+def ads_search_terms(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 # ======================================================
 # AMAZON ADS API HELPERS
