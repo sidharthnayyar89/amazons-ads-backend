@@ -1613,20 +1613,22 @@ def sp_keywords_fetch(
 # ===============================
 # SP Search Terms: create & run
 # ===============================
-from fastapi import Query
 
 @app.post("/api/sp/st_start")
 def sp_search_terms_start(lookback_days: int = 2):
     """
     Create a Sponsored Products Search Terms DAILY report (ending yesterday).
-    Returns a report_id immediately.
+    Returns a report_id immediately (or an existing one if it's a duplicate request).
     """
     import re
     from datetime import date, timedelta
+    import httpx
 
+    # 1) date range (ending yesterday)
     end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=max(1, lookback_days) - 1)
 
+    # 2) auth/region/headers
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
     region = os.environ.get("AMZN_REGION", "NA").upper()
@@ -1635,44 +1637,43 @@ def sp_search_terms_start(lookback_days: int = 2):
     def _ymd(d: date) -> str:
         return d.strftime("%Y-%m-%d")
 
-    body = {
+    # 3) correct configuration for SP Search Terms (no groupBy)
+    create_body = {
         "name": f"spSearchTerm_{_ymd(start_date)}_{_ymd(end_date)}",
         "startDate": _ymd(start_date),
         "endDate": _ymd(end_date),
         "configuration": {
             "adProduct": "SPONSORED_PRODUCTS",
-            "reportTypeId": "spSearchTerm",  # Amazon Reports v3
+            "reportTypeId": "spSearchTerm",  # <- THIS is the key bit
             "timeUnit": "DAILY",
-            "groupBy": ["adGroup"],         # allowed for this report
             "columns": [
                 "date",
-                "campaignId","campaignName",
-                "adGroupId","adGroupName",
-                "searchTerm",               # <— key difference
-                "keywordId","keywordText","matchType",
-                "impressions","clicks","cost",
-                "attributedSales14d","attributedConversions14d"
+                "campaignId", "campaignName",
+                "adGroupId", "adGroupName",
+                "searchTerm", "matchType",
+                "impressions", "clicks", "cost",
+                "attributedSales14d", "attributedConversions14d"
             ],
             "format": "GZIP_JSON"
         }
     }
 
+    # 4) create report; handle duplicate (HTTP 425) gracefully
     with httpx.Client(timeout=60) as client:
-        cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=body)
+        cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
 
     if 200 <= cr.status_code < 300:
         return {"report_id": cr.json().get("reportId")}
 
     if cr.status_code == 425:
-        import re
         try:
-            rid = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail","")).group(1)
+            rid = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail", "")).group(1)
             return {"report_id": rid, "duplicate": True}
         except Exception:
             pass
 
+    # bubble up any other error from Amazon Ads
     raise HTTPException(status_code=cr.status_code, detail=cr.text)
-
 
 @app.post("/api/sp/st_run")
 def sp_search_terms_run(lookback_days: int = 2, background_tasks: BackgroundTasks = None):
