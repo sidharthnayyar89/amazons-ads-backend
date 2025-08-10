@@ -1160,7 +1160,7 @@ def sp_keywords_fetch(
             detail={"stage": "download", "status": 400, "body": f"urllib error: {e!r}"},
         )
 
-    # 3) gunzip (or fallback to plain)
+        # 3) gunzip (or fallback to plain)
     try:
         buf = io.BytesIO(raw_bytes)
         with gzip.GzipFile(fileobj=buf) as gz:
@@ -1168,61 +1168,77 @@ def sp_keywords_fetch(
     except OSError:
         raw_text = raw_bytes.decode("utf-8", errors="ignore")
 
-    # 4) iterate records (NDJSON or JSON array)
+    # --- DEBUG: log a small prefix so we know the shape ---
+    try:
+        print("[fetch_debug] size_bytes=", len(raw_text), "prefix=", raw_text[:600].replace("\n","\\n")[:600])
+    except Exception:
+        pass
+
+    # 4) iterate records from multiple possible shapes
+    import json as _json
+
+    def extract_records(obj):
+        """Yield dict records from a loaded JSON object that might be:
+           - a list of dicts
+           - a dict with a key that holds a list of dicts
+           - a single dict record
+        """
+        if isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, dict):
+                    yield item
+        elif isinstance(obj, dict):
+            # common wrappers
+            for k in ("records", "rows", "data", "report", "result", "items"):
+                v = obj.get(k)
+                if isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, dict):
+                            yield item
+                    return
+                # sometimes nested like {"report": {"records":[...]}}
+                if isinstance(v, dict):
+                    for kk in ("records", "rows", "data", "items"):
+                        vv = v.get(kk)
+                        if isinstance(vv, list):
+                            for item in vv:
+                                if isinstance(item, dict):
+                                    yield item
+                            return
+            # if it's just a single record dict
+            yield obj
+
     def iter_records(text: str):
-        any_yield = False
+        # Try NDJSON first (fast path)
+        out = []
         for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
-            any_yield = True
-            yield _json.loads(line)
-        if not any_yield:
             try:
-                arr = _json.loads(text)
-                if isinstance(arr, list):
-                    for obj in arr:
-                        yield obj
+                obj = _json.loads(line)
             except Exception:
-                pass
+                # if any line is not JSON, bail from NDJSON path
+                out = []
+                break
+            # Expand possible wrappers per line
+            out.extend(list(extract_records(obj)))
+        if out:
+            return out
 
-    # Known columns/order for list rows from this report
-    COLS = [
-        "date","campaignId","campaignName","adGroupId","adGroupName",
-        "keywordId","keywordText","matchType","impressions","clicks",
-        "cost","attributedSales14d","attributedConversions14d"
-    ]
-
-    def normalize(row):
-        """Return a clean dict regardless of list/dict input."""
-        if isinstance(row, list):
-            # map by fixed order
-            rec = dict(zip(COLS, row))
-        elif isinstance(row, dict):
-            rec = row
-        else:
-            return None
-
+        # Fallback: whole-text JSON
         try:
-            date_str = (str(rec.get("date")) or str(rec.get("reportDate")) or "")[:10]
-            out = {
-                "date": date_str,
-                "campaign_id": str(rec.get("campaignId") or ""),
-                "campaign_name": (rec.get("campaignName") or "")[:255],
-                "ad_group_id": str(rec.get("adGroupId") or ""),
-                "ad_group_name": (rec.get("adGroupName") or "")[:255],
-                "keyword_id": str(rec.get("keywordId") or "0"),
-                "keyword_text": (rec.get("keywordText") or "")[:255],
-                "match_type": (rec.get("matchType") or ""),
-                "impressions": int(rec.get("impressions") or 0),
-                "clicks": int(rec.get("clicks") or 0),
-                "cost": float(rec.get("cost") or 0.0),
-                "sales": float(rec.get("attributedSales14d") or 0.0),
-                "orders": int(rec.get("attributedConversions14d") or 0),
-            }
-            return out if out["date"] else None
+            obj = _json.loads(text)
+            return list(extract_records(obj))
         except Exception:
-            return None
+            return []
+
+    records = iter_records(raw_text)
+    if not records:
+        raise HTTPException(
+            status_code=502,
+            detail={"stage": "parse", "body_prefix": raw_text[:600]}
+        )
 
     # 5) upsert
     pid = _env("AMZN_PROFILE_ID")
@@ -1268,40 +1284,35 @@ def sp_keywords_fetch(
     """)
 
     with engine.begin() as conn:
-        for row in iter_records(raw_text):
-            rec = normalize(row)
-            if not rec:
+        for rec in records:
+            # map fields
+            date_str = (rec.get("date") or rec.get("reportDate") or "")[:10]
+            if not date_str:
                 continue
 
-            # derived
-            cpc  = round(rec["cost"] / rec["clicks"], 6) if rec["clicks"] else 0.0
-            ctr  = round(rec["clicks"] / rec["impressions"], 6) if rec["impressions"] else 0.0
-            acos = round(rec["cost"] / rec["sales"], 6) if rec["sales"] else 0.0
-            roas = round(rec["sales"] / rec["cost"], 6) if rec["cost"] else 0.0
-
-            params = {
+            d = {
                 "profile_id": pid,
-                "date": rec["date"],
-                "keyword_id": rec["keyword_id"],
-                "campaign_id": rec["campaign_id"],
-                "campaign_name": rec["campaign_name"],
-                "ad_group_id": rec["ad_group_id"],
-                "ad_group_name": rec["ad_group_name"],
-                "keyword_text": rec["keyword_text"],
-                "match_type": rec["match_type"],
-                "impressions": rec["impressions"],
-                "clicks": rec["clicks"],
-                "cost": rec["cost"],
-                "sales": rec["sales"],
-                "orders": rec["orders"],
-                "cpc": cpc,
-                "ctr": ctr,
-                "acos": acos,
-                "roas": roas,
-                "run_id": run_id,
+                "date": date_str,
+                "campaign_id": str(rec.get("campaignId") or ""),
+                "campaign_name": rec.get("campaignName") or "",
+                "ad_group_id": str(rec.get("adGroupId") or ""),
+                "ad_group_name": rec.get("adGroupName") or "",
+                "keyword_id": str(rec.get("keywordId") or "0"),
+                "keyword_text": rec.get("keywordText") or "",
+                "match_type": rec.get("matchType") or "",
+                "impressions": int(rec.get("impressions") or 0),
+                "clicks": int(rec.get("clicks") or 0),
+                "cost": float(rec.get("cost") or 0.0),
+                "sales": float(rec.get("attributedSales14d") or 0.0),
+                "orders": int(rec.get("attributedConversions14d") or 0),
             }
+            d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
+            d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
+            d["acos"] = round(d["cost"] / d["sales"], 6) if d["sales"] else 0.0
+            d["roas"] = round(d["sales"] / d["cost"], 6) if d["cost"] else 0.0
+            d["run_id"] = run_id
 
-            res = conn.execute(upsert_sql, params).first()
+            res = conn.execute(upsert_sql, d).first()
             if res and res[0] is True:
                 inserted += 1
             else:
