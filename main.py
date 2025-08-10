@@ -1189,10 +1189,20 @@ def sp_keywords_fetch(
             except Exception:
                 pass
 
-    # 5) upsert
+       # 5) upsert
     pid = _env("AMZN_PROFILE_ID")
     run_id = str(_uuid.uuid4())
     inserted = updated = processed = 0
+
+    # index mapping for list-style rows (exact order from your report configuration)
+    COLS = [
+        "date",
+        "campaignId","campaignName",
+        "adGroupId","adGroupName",
+        "keywordId","keywordText","matchType",
+        "impressions","clicks","cost",
+        "attributedSales14d","attributedConversions14d",
+    ]
 
     upsert_sql = text("""
         INSERT INTO fact_sp_keyword_daily (
@@ -1201,7 +1211,7 @@ def sp_keywords_fetch(
             keyword_text, match_type,
             impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
             cpc, ctr, acos, roas,
-            run_id
+            run_id, pulled_at
         )
         VALUES (
             :profile_id, :date, :keyword_id,
@@ -1209,7 +1219,7 @@ def sp_keywords_fetch(
             :keyword_text, :match_type,
             :impressions, :clicks, :cost, :sales, :orders,
             :cpc, :ctr, :acos, :roas,
-            :run_id
+            :run_id, now()
         )
         ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
             campaign_id = EXCLUDED.campaign_id,
@@ -1232,31 +1242,77 @@ def sp_keywords_fetch(
         RETURNING xmax = 0 AS inserted_flag
     """)
 
+    def coerce_num(x, kind="int"):
+        if x is None or x == "":
+            return 0 if kind == "int" else 0.0
+        try:
+            return int(x) if kind == "int" else float(x)
+        except Exception:
+            return 0 if kind == "int" else 0.0
+
     with engine.begin() as conn:
         for rec in iter_records(raw_text):
+            # normalize row into a dict
+            if isinstance(rec, dict):
+                row = {
+                    "date": (rec.get("date") or rec.get("reportDate") or "")[:10],
+                    "campaignId": str(rec.get("campaignId", "") or ""),
+                    "campaignName": rec.get("campaignName", "") or "",
+                    "adGroupId": str(rec.get("adGroupId", "") or ""),
+                    "adGroupName": rec.get("adGroupName", "") or "",
+                    "keywordId": str(rec.get("keywordId", "") or "0"),
+                    "keywordText": rec.get("keywordText", "") or "",
+                    "matchType": rec.get("matchType", "") or "",
+                    "impressions": rec.get("impressions", 0),
+                    "clicks": rec.get("clicks", 0),
+                    "cost": rec.get("cost", 0.0),
+                    "attributedSales14d": rec.get("attributedSales14d", 0.0),
+                    "attributedConversions14d": rec.get("attributedConversions14d", 0),
+                }
+            elif isinstance(rec, list):
+                # map by index to our expected columns
+                vals = rec + [None] * max(0, len(COLS) - len(rec))
+                row = {COLS[i]: vals[i] for i in range(min(len(COLS), len(vals)))}
+                # ensure date is iso
+                row["date"] = (str(row.get("date") or "")[:10])
+            else:
+                continue  # unknown shape
+
+            if not row["date"]:
+                continue
+
+            impressions = coerce_num(row.get("impressions"), "int")
+            clicks      = coerce_num(row.get("clicks"), "int")
+            cost        = coerce_num(row.get("cost"), "float")
+            sales       = coerce_num(row.get("attributedSales14d"), "float")
+            orders      = coerce_num(row.get("attributedConversions14d"), "int")
+
+            cpc  = round(cost / clicks, 6) if clicks else 0.0
+            ctr  = round(clicks / impressions, 6) if impressions else 0.0
+            acos = round(cost / sales, 6) if sales else 0.0
+            roas = round(sales / cost, 6) if cost else 0.0
+
             d = {
                 "profile_id": pid,
-                "date": (rec.get("date") or rec.get("reportDate") or "")[:10],
-                "campaign_id": str(rec.get("campaignId", "") or ""),
-                "campaign_name": rec.get("campaignName", "") or "",
-                "ad_group_id": str(rec.get("adGroupId", "") or ""),
-                "ad_group_name": rec.get("adGroupName", "") or "",
-                "keyword_id": str(rec.get("keywordId", "") or "0"),
-                "keyword_text": rec.get("keywordText", "") or "",
-                "match_type": rec.get("matchType", "") or "",
-                "impressions": int(rec.get("impressions", 0) or 0),
-                "clicks": int(rec.get("clicks", 0) or 0),
-                "cost": float(rec.get("cost", 0.0) or 0.0),
-                "sales": float(rec.get("attributedSales14d", 0.0) or 0.0),
-                "orders": int(rec.get("attributedConversions14d", 0) or 0),
+                "date": row["date"],
+                "keyword_id": str(row.get("keywordId") or "0"),
+                "campaign_id": str(row.get("campaignId") or ""),
+                "campaign_name": row.get("campaignName") or "",
+                "ad_group_id": str(row.get("adGroupId") or ""),
+                "ad_group_name": row.get("adGroupName") or "",
+                "keyword_text": row.get("keywordText") or "",
+                "match_type": row.get("matchType") or "",
+                "impressions": impressions,
+                "clicks": clicks,
+                "cost": cost,
+                "sales": sales,
+                "orders": orders,
+                "cpc": cpc,
+                "ctr": ctr,
+                "acos": acos,
+                "roas": roas,
+                "run_id": run_id,
             }
-            if not d["date"]:
-                continue
-            d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
-            d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
-            d["acos"] = round(d["cost"] / d["sales"], 6) if d["sales"] else 0.0
-            d["roas"] = round(d["sales"] / d["cost"], 6) if d["cost"] else 0.0
-            d["run_id"] = run_id
 
             res = conn.execute(upsert_sql, d).first()
             if res and res[0] is True:
@@ -1269,4 +1325,3 @@ def sp_keywords_fetch(
                 break
 
     return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
-
