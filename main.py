@@ -1,4 +1,4 @@
-spfrom datetime import date
+from datetime import date
 from datetime import timedelta
 from typing import List
 from fastapi import FastAPI, Query, Request, HTTPException
@@ -1358,25 +1358,33 @@ def sp_counts():
     return out
 
 @app.get("/api/debug/st_counts")
-def debug_st_counts():
-    """Show daily counts & metrics from fact_sp_search_term_daily table."""
-    with closing(conn.cursor()) as cur:
-        cur.execute("""
+def st_counts():
+    """Show daily counts & spend from fact_sp_search_term_daily."""
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    pid = _env("AMZN_PROFILE_ID")
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
             SELECT 
                 date,
                 COUNT(*) AS rows,
                 SUM(clicks) AS clicks,
-                SUM(cost) AS cost
+                SUM(cost)   AS cost
             FROM fact_sp_search_term_daily
+            WHERE profile_id = :pid
             GROUP BY date
             ORDER BY date DESC
             LIMIT 30
-        """)
-        rows = [
-            {"date": r[0], "rows": r[1], "clicks": r[2], "cost": r[3]}
-            for r in cur.fetchall()
-        ]
-    return rows
+        """), {"pid": pid}).mappings().all()
+    return [
+        {
+            "date": r["date"].isoformat(),
+            "rows": int(r["rows"]),
+            "clicks": int(r["clicks"]) if r["clicks"] else 0,
+            "cost": float(r["cost"]) if r["cost"] else 0.0,
+        }
+        for r in rows
+    ]
 
 @app.get("/api/debug/report_head")
 def debug_report_head(report_id: str):
