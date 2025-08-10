@@ -1,191 +1,164 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="utf-8" />
-  <title>SP Keywords Viewer</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8">
+  <title>Ads Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
-    h1 { margin: 0 0 12px; }
-    .controls { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 12px; }
-    label { display:block; font-size:12px; color:#444; margin-bottom:4px; }
-    input, select, button { padding: 8px; font-size: 14px; }
-    button { cursor: pointer; }
-    .row { display: flex; gap: 12px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border-bottom: 1px solid #eee; padding: 8px 6px; text-align: left; font-size: 13px; }
-    th { position: sticky; top: 0; background: #fafafa; z-index: 1; }
-    .pagination { display:flex; gap:8px; align-items:center; margin-top:12px; }
-    .muted { color:#777; font-size:12px; }
-    .right { margin-left:auto; }
-    .metrics { font-variant-numeric: tabular-nums; }
-    .nowrap { white-space: nowrap; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:#111; }
+    .wrap { display:flex; min-height:100vh; }
+    .sidebar {
+      width: 260px; background:#0f172a; color:#e5e7eb; padding:16px; position:sticky; top:0; height:100vh;
+    }
+    .brand { font-weight:700; margin-bottom:16px; font-size:18px; letter-spacing:.3px; }
+    .h1 { text-transform:uppercase; font-size:12px; color:#94a3b8; margin:20px 0 8px; }
+    .nav a {
+      display:block; padding:10px 12px; color:#e5e7eb; text-decoration:none; border-radius:8px; margin-bottom:6px;
+    }
+    .nav a.active, .nav a:hover { background:#1f2937; }
+    .main { flex:1; padding:20px; background:#f8fafc; }
+    .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+    input, button, select {
+      padding:8px 10px; border:1px solid #cbd5e1; border-radius:8px; background:#fff;
+    }
+    button { cursor:pointer; }
+    table { width:100%; border-collapse:collapse; background:#fff; border-radius:10px; overflow:hidden; }
+    th, td { padding:10px; border-bottom:1px solid #e5e7eb; text-align:left; font-size:13px; }
+    th { background:#f1f5f9; position:sticky; top:0; }
+    .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:12px; margin-bottom:16px; }
+    .muted { color:#475569; font-size:12px; }
   </style>
 </head>
 <body>
-  <h1>Sponsored Products — Keywords</h1>
-
-  <div class="controls">
-    <div>
-      <label for="start">Start date</label>
-      <input id="start" type="date" />
+<div class="wrap">
+  <aside class="sidebar">
+    <div class="brand">Your Ads Console</div>
+    <div class="h1">Advertising</div>
+    <div class="nav">
+      <a href="#keywords" id="nav-keywords">Keyword Data</a>
+      <a href="#searchterms" id="nav-searchterms">Search Terms</a>
     </div>
-    <div>
-      <label for="end">End date</label>
-      <input id="end" type="date" />
+  </aside>
+
+  <main class="main">
+    <div class="toolbar">
+      <label>Start: <input type="date" id="start"></label>
+      <label>End: <input type="date" id="end"></label>
+      <button id="loadBtn">Load</button>
+      <span class="muted" id="status"></span>
     </div>
-    <div>
-      <label for="limit">Rows per page</label>
-      <select id="limit">
-        <option>50</option>
-        <option selected>100</option>
-        <option>250</option>
-        <option>500</option>
-      </select>
+    <div class="card">
+      <table id="dataTable">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
     </div>
-    <div>
-      <button id="apply">Apply</button>
-    </div>
-    <div class="right muted" id="status"></div>
-  </div>
+  </main>
+</div>
 
-  <div class="pagination">
-    <button id="prev">Prev</button>
-    <div class="muted">Page <span id="pageNum">1</span></div>
-    <button id="next">Next</button>
-    <button id="download">Download CSV</button>
-  </div>
+<script>
+  const thead = document.getElementById('thead');
+  const tbody = document.getElementById('tbody');
+  const statusEl = document.getElementById('status');
+  const navKeywords = document.getElementById('nav-keywords');
+  const navSearch = document.getElementById('nav-searchterms');
+  const startEl = document.getElementById('start');
+  const endEl = document.getElementById('end');
 
-  <table id="tbl">
-    <thead>
-      <tr>
-        <th class="nowrap">Date</th>
-        <th>Campaign</th>
-        <th>Ad Group</th>
-        <th>Keyword</th>
-        <th>Match</th>
-        <th class="metrics">Impr</th>
-        <th class="metrics">Clicks</th>
-        <th class="metrics">Spend</th>
-        <th class="metrics">Sales</th>
-        <th class="metrics">Orders</th>
-        <th class="metrics">CPC</th>
-        <th class="metrics">CTR</th>
-        <th class="metrics">ACOS</th>
-        <th class="metrics">ROAS</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  // default to the last 2 days
+  const today = new Date();
+  const yday = new Date(today.getTime() - 86400000);
+  const d2 = new Date(today.getTime() - 2*86400000);
+  startEl.value = d2.toISOString().slice(0,10);
+  endEl.value = yday.toISOString().slice(0,10);
 
-  <script>
-    const API_BASE = location.origin;
-    const qs = new URLSearchParams(location.search);
-    const startEl = document.getElementById('start');
-    const endEl   = document.getElementById('end');
-    const limitEl = document.getElementById('limit');
-    const applyBtn= document.getElementById('apply');
-    const prevBtn = document.getElementById('prev');
-    const nextBtn = document.getElementById('next');
-    const pageNum = document.getElementById('pageNum');
-    const statusEl= document.getElementById('status');
-    const tbody   = document.querySelector('#tbl tbody');
-    const dlBtn   = document.getElementById('download');
+  function setActive(hash) {
+    navKeywords.classList.toggle('active', hash === '#keywords');
+    navSearch.classList.toggle('active', hash === '#searchterms');
+  }
 
-    // defaults: last 2 days
-    function yyyy_mm_dd(d){
-      const m = String(d.getMonth()+1).padStart(2,'0');
-      const day = String(d.getDate()).padStart(2,'0');
-      return `${d.getFullYear()}-${m}-${day}`;
+  function currentView() {
+    return (location.hash === '#searchterms') ? 'searchterms' : 'keywords';
+  }
+
+  function columnsFor(view) {
+    if (view === 'searchterms') {
+      return [
+        'date','campaign_name','ad_group_name','search_term',
+        'keyword_text','match_type','impressions','clicks','cost','sales','orders','cpc','ctr','acos','roas'
+      ];
     }
-    const today = new Date();
-    const y = new Date(today); y.setDate(y.getDate()-1);
-    const y2 = new Date(today); y2.setDate(y2.getDate()-2);
+    // keywords
+    return [
+      'date','campaign_name','ad_group_name','keyword_text',
+      'match_type','impressions','clicks','cost','sales','orders','cpc','ctr','acos','roas'
+    ];
+  }
 
-    startEl.value = qs.get('start') || yyyy_mm_dd(y2);
-    endEl.value   = qs.get('end')   || yyyy_mm_dd(y);
-    limitEl.value = qs.get('limit') || '100';
+  async function loadData() {
+    const s = startEl.value;
+    const e = endEl.value;
+    const view = currentView();
+    setActive('#' + view);
 
-    let page = 1;
-    let lastBatch = [];
+    let url;
+    if (view === 'searchterms') {
+      url = `/api/sp/searchterms_range?start=${s}&end=${e}&limit=1000`;
+    } else {
+      url = `/api/sp/keywords_range?start=${s}&end=${e}&limit=1000`;
+    }
 
-    async function load(){
-      const start = startEl.value;
-      const end   = endEl.value;
-      const limit = parseInt(limitEl.value,10);
-      const offset= (page-1) * limit;
-
-      const url = `${API_BASE}/api/sp/keywords_range?start=${start}&end=${end}&limit=${limit}&offset=${offset}`;
-      statusEl.textContent = 'Loading...';
-      const t0 = performance.now();
+    statusEl.textContent = 'Loading...';
+    tbody.innerHTML = '';
+    try {
       const res = await fetch(url);
       const data = await res.json();
-      lastBatch = Array.isArray(data) ? data : [];
-      render(lastBatch);
-      const ms = Math.round(performance.now()-t0);
-      statusEl.textContent = `Loaded ${lastBatch.length} rows in ${ms} ms`;
-      pageNum.textContent = String(page);
-    }
 
-    function render(rows){
-      tbody.innerHTML = '';
-      for (const r of rows){
-        const tr = document.createElement('tr');
-        const m = r.metrics || {};
-        tr.innerHTML = `
-          <td class="nowrap">${(r.pulled_at || '')}</td>
-          <td>${r.campaign_name || ''}</td>
-          <td>${r.ad_group_name || ''}</td>
-          <td>${r.keyword_text || ''}</td>
-          <td>${r.match_type || ''}</td>
-          <td class="metrics">${m.impressions ?? ''}</td>
-          <td class="metrics">${m.clicks ?? ''}</td>
-          <td class="metrics">${m.spend ?? ''}</td>
-          <td class="metrics">${m.sales ?? ''}</td>
-          <td class="metrics">${m.orders ?? ''}</td>
-          <td class="metrics">${m.cpc ?? ''}</td>
-          <td class="metrics">${m.ctr ?? ''}</td>
-          <td class="metrics">${m.acos ?? ''}</td>
-          <td class="metrics">${m.roas ?? ''}</td>
-        `;
-        tbody.appendChild(tr);
+      const cols = columnsFor(view);
+      thead.innerHTML = '<tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '</tr>';
+
+      const fmt = n => (typeof n === 'number' ? n.toLocaleString() : (n ?? ''));
+
+      // data for keywords_range returns an array of objects with nested metrics in your earlier endpoint;
+      // searchterms_range returns flat dicts (we return dict(r)).
+      for (const row of data) {
+        const flat = row.metrics ? {
+          date: row.pulled_at, // not ideal; keywords_range returns date inside DB row; you can expose it similarly
+          campaign_name: row.campaign_name,
+          ad_group_name: row.ad_group_name,
+          keyword_text: row.keyword_text,
+          match_type: row.match_type,
+          impressions: row.metrics.impressions,
+          clicks: row.metrics.clicks,
+          cost: row.metrics.spend,
+          sales: row.metrics.sales,
+          orders: row.metrics.orders,
+          cpc: row.metrics.cpc,
+          ctr: row.metrics.ctr,
+          acos: row.metrics.acos,
+          roas: row.metrics.roas,
+          search_term: row.search_term || ''
+        } : row;
+
+        const tds = columnsFor(view).map(k => `<td>${fmt(flat[k])}</td>`).join('');
+        tbody.insertAdjacentHTML('beforeend', `<tr>${tds}</tr>`);
       }
+
+      statusEl.textContent = `Rows: ${data.length}`;
+    } catch (err) {
+      console.error(err);
+      statusEl.textContent = 'Error loading data';
     }
+  }
 
-    function toCSV(rows){
-      const header = [
-        'pulled_at','campaign_name','ad_group_name','keyword_text','match_type',
-        'impressions','clicks','spend','sales','orders','cpc','ctr','acos','roas'
-      ];
-      const lines = [header.join(',')];
-      for(const r of rows){
-        const m = r.metrics || {};
-        const vals = [
-          r.pulled_at, r.campaign_name, r.ad_group_name, r.keyword_text, r.match_type,
-          m.impressions, m.clicks, m.spend, m.sales, m.orders, m.cpc, m.ctr, m.acos, m.roas
-        ].map(v => (v==null ? '' : String(v).replaceAll('"','""')));
-        lines.push(vals.map(v => `"${v}"`).join(','));
-      }
-      return lines.join('\n');
-    }
+  document.getElementById('loadBtn').addEventListener('click', loadData);
+  window.addEventListener('hashchange', loadData);
 
-    applyBtn.addEventListener('click', () => { page = 1; load(); });
-    prevBtn.addEventListener('click', () => { if (page>1){ page--; load(); } });
-    nextBtn.addEventListener('click', () => { if (lastBatch.length >= parseInt(limitEl.value,10)){ page++; load(); }});
-    dlBtn.addEventListener('click', () => {
-      const csv = toCSV(lastBatch);
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `sp_keywords_page${page}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    });
-
-    load();
-  </script>
+  // set default view
+  if (!location.hash) location.hash = '#keywords';
+  setActive(location.hash);
+  loadData();
+</script>
 </body>
 </html>
