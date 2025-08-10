@@ -1,4 +1,4 @@
-from datetime import date
+spfrom datetime import date
 from datetime import timedelta
 from typing import List
 from fastapi import FastAPI, Query, Request, HTTPException
@@ -1356,6 +1356,27 @@ def sp_counts():
             "cost": float(r["cost"]) if r["cost"] else 0.0,
         })
     return out
+
+@app.get("/api/debug/st_counts")
+def debug_st_counts():
+    """Show daily counts & metrics from fact_sp_search_term_daily table."""
+    with closing(conn.cursor()) as cur:
+        cur.execute("""
+            SELECT 
+                date,
+                COUNT(*) AS rows,
+                SUM(clicks) AS clicks,
+                SUM(cost) AS cost
+            FROM fact_sp_search_term_daily
+            GROUP BY date
+            ORDER BY date DESC
+            LIMIT 30
+        """)
+        rows = [
+            {"date": r[0], "rows": r[1], "clicks": r[2], "cost": r[3]}
+            for r in cur.fetchall()
+        ]
+    return rows
 
 @app.get("/api/debug/report_head")
 def debug_report_head(report_id: str):
