@@ -62,6 +62,41 @@ def init_db():
     with engine.begin() as conn:
         conn.exec_driver_sql(ddl)
 
+CREATE TABLE IF NOT EXISTS fact_sp_search_term_daily (
+  profile_id     text NOT NULL,
+  date           date NOT NULL,
+
+  campaign_id    text NOT NULL,
+  campaign_name  text NOT NULL,
+  ad_group_id    text NOT NULL,
+  ad_group_name  text NOT NULL,
+
+  -- search term + (optional) keyword context
+  search_term    text NOT NULL,
+  keyword_id     text,
+  keyword_text   text,
+  match_type     text NOT NULL,
+
+  impressions    integer NOT NULL,
+  clicks         integer NOT NULL,
+  cost           numeric(18,4) NOT NULL,
+  attributed_sales_14d numeric(18,4) NOT NULL,
+  attributed_conversions_14d integer NOT NULL,
+
+  -- derived
+  cpc            numeric(18,6) NOT NULL,
+  ctr            numeric(18,6) NOT NULL,
+  acos           numeric(18,6) NOT NULL,
+  roas           numeric(18,6) NOT NULL,
+
+  run_id         uuid NOT NULL,
+  pulled_at      timestamptz NOT NULL DEFAULT now(),
+
+  CONSTRAINT uq_st UNIQUE(profile_id, date, ad_group_id, search_term)
+);
+CREATE INDEX IF NOT EXISTS idx_st_profile_date ON fact_sp_search_term_daily(profile_id, date);
+CREATE INDEX IF NOT EXISTS idx_st_term_date ON fact_sp_search_term_daily(search_term, date);
+
 init_db()
 
 # ======================================================
@@ -746,6 +781,257 @@ def sp_keywords_fetch(report_id: str, limit: int = 500):
             conn.execute(text(sql), to_insert)
 
     return rows_out
+
+# ================================
+# SP SEARCH TERMS (Reports v3)
+# ================================
+from fastapi import Query
+import io, gzip, json as _json, uuid as _uuid, urllib.request
+
+@app.post("/api/sp/searchterms_start")
+def sp_searchterms_start(lookback_days: int = 2):
+    """
+    Create a Sponsored Products Search Terms DAILY report for the last `lookback_days`
+    (ending yesterday). Returns a report_id immediately.
+    """
+    from datetime import date, timedelta
+    import re
+
+    end_date = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=max(1, lookback_days) - 1)
+
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    def _ymd(d: date) -> str:
+        return d.strftime("%Y-%m-%d")
+
+    create_body = {
+        "name": f"spSearchTerms_{_ymd(start_date)}_{_ymd(end_date)}",
+        "startDate": _ymd(start_date),
+        "endDate": _ymd(end_date),
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "reportTypeId": "spSearchTerms",
+            "timeUnit": "DAILY",
+            "groupBy": ["adGroup"],  # allowed for this report
+            "columns": [
+                "date",
+                "campaignId","campaignName",
+                "adGroupId","adGroupName",
+                "keywordId","keywordText",
+                "searchTerm","matchType",
+                "impressions","clicks","cost",
+                "attributedSales14d","attributedConversions14d"
+            ],
+            "format": "GZIP_JSON"
+        }
+    }
+
+    with httpx.Client(timeout=60) as client:
+        cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
+
+    if 200 <= cr.status_code < 300:
+        return {"report_id": cr.json().get("reportId")}
+    elif cr.status_code == 425:
+        import re
+        try:
+            rid = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail","")).group(1)
+            return {"report_id": rid, "duplicate": True}
+        except Exception:
+            pass
+    raise HTTPException(status_code=cr.status_code, detail=cr.text)
+
+
+@app.post("/api/sp/searchterms_fetch")
+def sp_searchterms_fetch(
+    report_id: str = Query(..., description="Amazon Reports v3 reportId"),
+    limit: int = Query(5000, ge=1, le=200000)
+):
+    """
+    Fetch COMPLETED Search Terms report by report_id (presigned S3 URL w/ NO headers),
+    parse & upsert into fact_sp_search_term_daily.
+    """
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    # 1) get meta (auth to Ads API)
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    status_url = f"{ads_base}/reporting/reports/{report_id}"
+    with httpx.Client(timeout=120) as client:
+        sr = client.get(status_url, headers=headers)
+        try:
+            sr.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={"stage": "check_report", "status": e.response.status_code, "body": e.response.text},
+            )
+        meta = sr.json()
+        st = meta.get("status")
+        url = meta.get("url")
+        if st not in ("SUCCESS", "COMPLETED") or not url:
+            return JSONResponse(status_code=409, content={"stage": "check_report", "status": st, "meta": meta})
+
+    # 2) download presigned S3 (NO headers)
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            raw_bytes = resp.read()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"stage":"download","status":400,"body":f"urllib error: {e!r}"})
+
+    # 3) gunzip (fallback to plain)
+    try:
+        buf = io.BytesIO(raw_bytes)
+        with gzip.GzipFile(fileobj=buf) as gz:
+            raw_text = gz.read().decode("utf-8")
+    except OSError:
+        raw_text = raw_bytes.decode("utf-8", errors="ignore")
+
+    # 4) iterate records
+    def iter_records(text: str):
+        any_yield = False
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            any_yield = True
+            yield _json.loads(line)
+        if not any_yield:
+            try:
+                arr = _json.loads(text)
+                if isinstance(arr, list):
+                    for obj in arr:
+                        yield obj
+            except Exception:
+                pass
+
+    # 5) upsert
+    pid = _env("AMZN_PROFILE_ID")
+    run_id = str(_uuid.uuid4())
+    inserted = updated = processed = 0
+
+    upsert_sql = text("""
+        INSERT INTO fact_sp_search_term_daily (
+          profile_id, date,
+          campaign_id, campaign_name, ad_group_id, ad_group_name,
+          search_term, keyword_id, keyword_text, match_type,
+          impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+          cpc, ctr, acos, roas,
+          run_id
+        )
+        VALUES (
+          :profile_id, :date,
+          :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+          :search_term, :keyword_id, :keyword_text, :match_type,
+          :impressions, :clicks, :cost, :sales, :orders,
+          :cpc, :ctr, :acos, :roas,
+          :run_id
+        )
+        ON CONFLICT (profile_id, date, ad_group_id, search_term) DO UPDATE SET
+          campaign_id = EXCLUDED.campaign_id,
+          campaign_name = EXCLUDED.campaign_name,
+          ad_group_id = EXCLUDED.ad_group_id,
+          ad_group_name = EXCLUDED.ad_group_name,
+          keyword_id = EXCLUDED.keyword_id,
+          keyword_text = EXCLUDED.keyword_text,
+          match_type = EXCLUDED.match_type,
+          impressions = EXCLUDED.impressions,
+          clicks = EXCLUDED.clicks,
+          cost = EXCLUDED.cost,
+          attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+          attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+          cpc = EXCLUDED.cpc,
+          ctr = EXCLUDED.ctr,
+          acos = EXCLUDED.acos,
+          roas = EXCLUDED.roas,
+          run_id = EXCLUDED.run_id,
+          pulled_at = now()
+        RETURNING xmax = 0 AS inserted_flag
+    """)
+
+    with engine.begin() as conn:
+        for rec in iter_records(raw_text):
+            # map fields safely
+            d = {
+                "profile_id": pid,
+                "date": (rec.get("date") or rec.get("reportDate") or "")[:10],
+                "campaign_id": str(rec.get("campaignId","") or ""),
+                "campaign_name": rec.get("campaignName","") or "",
+                "ad_group_id": str(rec.get("adGroupId","") or ""),
+                "ad_group_name": rec.get("adGroupName","") or "",
+
+                "search_term": rec.get("searchTerm","") or "",
+                "keyword_id": str(rec.get("keywordId","") or "0"),   # may be missing for auto-targeting
+                "keyword_text": rec.get("keywordText","") or "",
+                "match_type": rec.get("matchType","") or "",
+
+                "impressions": int(rec.get("impressions",0) or 0),
+                "clicks": int(rec.get("clicks",0) or 0),
+                "cost": float(rec.get("cost",0.0) or 0.0),
+                "sales": float(rec.get("attributedSales14d",0.0) or 0.0),
+                "orders": int(rec.get("attributedConversions14d",0) or 0),
+            }
+            if not d["date"] or not d["search_term"]:
+                continue
+
+            d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
+            d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
+            d["acos"] = round(d["cost"] / d["sales"], 6) if d["sales"] else 0.0
+            d["roas"] = round(d["sales"] / d["cost"], 6) if d["cost"] else 0.0
+            d["run_id"] = run_id
+
+            res = conn.execute(upsert_sql, d).first()
+            inserted += 1 if (res and res[0] is True) else 0
+            updated  += 0 if (res and res[0] is True) else 1
+
+            processed += 1
+            if processed >= limit:
+                break
+
+    return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
+
+
+@app.get("/api/sp/searchterms_range")
+def sp_searchterms_range(start: str, end: str, limit: int = 1000):
+    """Return stored search-term rows in [start, end]."""
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    from datetime import date as _date
+    pid = _env("AMZN_PROFILE_ID")
+    try:
+        start_d = _date.fromisoformat(start)
+        end_d = _date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD")
+
+    q = """
+    SELECT
+      profile_id, date,
+      campaign_id, campaign_name, ad_group_id, ad_group_name,
+      search_term, keyword_id, keyword_text, match_type,
+      impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+      cpc, ctr, acos, roas,
+      run_id, pulled_at
+    FROM fact_sp_search_term_daily
+    WHERE profile_id = :pid
+      AND date >= :start_d
+      AND date <= :end_d
+    ORDER BY date DESC, campaign_name, ad_group_name, search_term
+    LIMIT :lim
+    """
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(q),
+            {"pid": pid, "start_d": start_d, "end_d": end_d, "lim": limit},
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 from fastapi import BackgroundTasks
 
