@@ -79,6 +79,9 @@ app.add_middleware(
 )
 
 templates = Jinja2Templates(directory="templates")
+@app.get("/ui/keywords", response_class=HTMLResponse)
+def ui_keywords(request: Request):
+    return templates.TemplateResponse("keywords.html", {"request": request})
 
 # ======================================================
 # DATA MODELS
