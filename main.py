@@ -1447,38 +1447,35 @@ def list_tables():
     return [{"schema": r["schemaname"], "table": r["tablename"]} for r in rows]
 
 # --- DEBUG: safer st_counts (returns error details instead of 500)
+
+from fastapi.responses import JSONResponse
+
 @app.get("/api/debug/st_counts_safe")
 def st_counts_safe():
     if not engine:
         raise HTTPException(status_code=500, detail="Database not configured")
     pid = _env("AMZN_PROFILE_ID")
-    try:
-        with engine.begin() as conn:
-            rows = conn.execute(text("""
-                SELECT date,
-                       COUNT(*) AS rows,
-                       COALESCE(SUM(clicks),0) AS clicks,
-                       COALESCE(SUM(cost),0)   AS cost
-                FROM fact_sp_search_term_daily
-                WHERE profile_id = :pid
-                GROUP BY date
-                ORDER BY date DESC
-                LIMIT 10
-            """), {"pid": pid}).mappings().all()
-        out = []
-        for r in rows:
-            out.append({
-                "date": r["date"].isoformat(),
-                "rows": int(r["rows"]),
-                "clicks": int(r["clicks"]),
-                "cost": float(r["cost"]),
-            })
-        return out
-    except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT date,
+                   COUNT(*) AS rows,
+                   COALESCE(SUM(clicks),0) AS clicks,
+                   COALESCE(SUM(cost),0)   AS cost
+            FROM fact_sp_search_term_daily
+            WHERE profile_id = :pid
+            GROUP BY date
+            ORDER BY date DESC
+            LIMIT 10
+        """), {"pid": pid}).mappings().all()
 
-# --- DEBUG: peek first few ST rows
+    out = [{
+        "date": r["date"].isoformat(),
+        "rows": int(r["rows"]),
+        "clicks": int(r["clicks"]),
+        "cost": float(r["cost"]),
+    } for r in rows]
+    return JSONResponse(content=out)
+
 @app.get("/api/debug/st_head")
 def st_head(limit: int = 20):
     if not engine:
@@ -1486,21 +1483,27 @@ def st_head(limit: int = 20):
     pid = _env("AMZN_PROFILE_ID")
     with engine.begin() as conn:
         rows = conn.execute(text("""
-            SELECT *
+            SELECT date, campaign_name, ad_group_name, search_term, match_type,
+                   impressions, clicks, cost, sales14d, purchases14d
             FROM fact_sp_search_term_daily
             WHERE profile_id = :pid
-            ORDER BY date DESC
+            ORDER BY date DESC, campaign_name, ad_group_name, search_term
             LIMIT :lim
         """), {"pid": pid, "lim": limit}).mappings().all()
-    # return raw rows so we see actual column names present
-    def _to_jsonable(m):
-        j = dict(m)
-        if hasattr(j.get("pulled_at"), "isoformat"):
-            j["pulled_at"] = j["pulled_at"].isoformat()
-        if hasattr(j.get("date"), "isoformat"):
-            j["date"] = j["date"].isoformat()
-        return j
-    return [_to_jsonable(r) for r in rows]
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["date"] = r["date"].isoformat()
+        # ensure all numerics are basic types
+        d["impressions"] = int(d["impressions"])
+        d["clicks"] = int(d["clicks"])
+        d["cost"] = float(d["cost"])
+        d["sales14d"] = float(d["sales14d"])
+        d["purchases14d"] = int(d["purchases14d"])
+        out.append(d)
+
+    return JSONResponse(content=out)
 
 @app.get("/api/debug/report_head")
 def debug_report_head(report_id: str):
