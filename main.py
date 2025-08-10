@@ -1116,9 +1116,7 @@ def debug_report_head(report_id: str):
 
     return {"stage": "ok", "sample": sample}
 
-# -------------------------------
-# PERMANENT INGEST: fetch & upsert (headerless S3 download)
-# -------------------------------
+# PERMANENT INGEST: fetch & upsert (headerless S3 download, robust row mapping)
 from fastapi import Query
 import io, gzip, json as _json, uuid as _uuid, urllib.request
 
@@ -1148,14 +1146,13 @@ def sp_keywords_fetch(
             )
         meta = sr.json()
         st = meta.get("status")
-        url = meta.get("url")
-        if st not in ("SUCCESS", "COMPLETED") or not url:
-            # not ready — let caller poll again later
+        presigned_url = meta.get("url")
+        if st not in ("SUCCESS", "COMPLETED") or not presigned_url:
             return JSONResponse(status_code=409, content={"stage": "check_report", "status": st, "meta": meta})
 
-    # 2) download presigned S3 URL with ZERO headers (no Authorization!)
+    # 2) download presigned S3 URL with ZERO headers
     try:
-        with urllib.request.urlopen(url, timeout=120) as resp:
+        with urllib.request.urlopen(presigned_url, timeout=120) as resp:
             raw_bytes = resp.read()
     except Exception as e:
         raise HTTPException(
@@ -1189,20 +1186,48 @@ def sp_keywords_fetch(
             except Exception:
                 pass
 
-       # 5) upsert
+    # Known columns/order for list rows from this report
+    COLS = [
+        "date","campaignId","campaignName","adGroupId","adGroupName",
+        "keywordId","keywordText","matchType","impressions","clicks",
+        "cost","attributedSales14d","attributedConversions14d"
+    ]
+
+    def normalize(row):
+        """Return a clean dict regardless of list/dict input."""
+        if isinstance(row, list):
+            # map by fixed order
+            rec = dict(zip(COLS, row))
+        elif isinstance(row, dict):
+            rec = row
+        else:
+            return None
+
+        try:
+            date_str = (str(rec.get("date")) or str(rec.get("reportDate")) or "")[:10]
+            out = {
+                "date": date_str,
+                "campaign_id": str(rec.get("campaignId") or ""),
+                "campaign_name": (rec.get("campaignName") or "")[:255],
+                "ad_group_id": str(rec.get("adGroupId") or ""),
+                "ad_group_name": (rec.get("adGroupName") or "")[:255],
+                "keyword_id": str(rec.get("keywordId") or "0"),
+                "keyword_text": (rec.get("keywordText") or "")[:255],
+                "match_type": (rec.get("matchType") or ""),
+                "impressions": int(rec.get("impressions") or 0),
+                "clicks": int(rec.get("clicks") or 0),
+                "cost": float(rec.get("cost") or 0.0),
+                "sales": float(rec.get("attributedSales14d") or 0.0),
+                "orders": int(rec.get("attributedConversions14d") or 0),
+            }
+            return out if out["date"] else None
+        except Exception:
+            return None
+
+    # 5) upsert
     pid = _env("AMZN_PROFILE_ID")
     run_id = str(_uuid.uuid4())
     inserted = updated = processed = 0
-
-    # index mapping for list-style rows (exact order from your report configuration)
-    COLS = [
-        "date",
-        "campaignId","campaignName",
-        "adGroupId","adGroupName",
-        "keywordId","keywordText","matchType",
-        "impressions","clicks","cost",
-        "attributedSales14d","attributedConversions14d",
-    ]
 
     upsert_sql = text("""
         INSERT INTO fact_sp_keyword_daily (
@@ -1242,71 +1267,33 @@ def sp_keywords_fetch(
         RETURNING xmax = 0 AS inserted_flag
     """)
 
-    def coerce_num(x, kind="int"):
-        if x is None or x == "":
-            return 0 if kind == "int" else 0.0
-        try:
-            return int(x) if kind == "int" else float(x)
-        except Exception:
-            return 0 if kind == "int" else 0.0
-
     with engine.begin() as conn:
-        for rec in iter_records(raw_text):
-            # normalize row into a dict
-            if isinstance(rec, dict):
-                row = {
-                    "date": (rec.get("date") or rec.get("reportDate") or "")[:10],
-                    "campaignId": str(rec.get("campaignId", "") or ""),
-                    "campaignName": rec.get("campaignName", "") or "",
-                    "adGroupId": str(rec.get("adGroupId", "") or ""),
-                    "adGroupName": rec.get("adGroupName", "") or "",
-                    "keywordId": str(rec.get("keywordId", "") or "0"),
-                    "keywordText": rec.get("keywordText", "") or "",
-                    "matchType": rec.get("matchType", "") or "",
-                    "impressions": rec.get("impressions", 0),
-                    "clicks": rec.get("clicks", 0),
-                    "cost": rec.get("cost", 0.0),
-                    "attributedSales14d": rec.get("attributedSales14d", 0.0),
-                    "attributedConversions14d": rec.get("attributedConversions14d", 0),
-                }
-            elif isinstance(rec, list):
-                # map by index to our expected columns
-                vals = rec + [None] * max(0, len(COLS) - len(rec))
-                row = {COLS[i]: vals[i] for i in range(min(len(COLS), len(vals)))}
-                # ensure date is iso
-                row["date"] = (str(row.get("date") or "")[:10])
-            else:
-                continue  # unknown shape
-
-            if not row["date"]:
+        for row in iter_records(raw_text):
+            rec = normalize(row)
+            if not rec:
                 continue
 
-            impressions = coerce_num(row.get("impressions"), "int")
-            clicks      = coerce_num(row.get("clicks"), "int")
-            cost        = coerce_num(row.get("cost"), "float")
-            sales       = coerce_num(row.get("attributedSales14d"), "float")
-            orders      = coerce_num(row.get("attributedConversions14d"), "int")
+            # derived
+            cpc  = round(rec["cost"] / rec["clicks"], 6) if rec["clicks"] else 0.0
+            ctr  = round(rec["clicks"] / rec["impressions"], 6) if rec["impressions"] else 0.0
+            acos = round(rec["cost"] / rec["sales"], 6) if rec["sales"] else 0.0
+            roas = round(rec["sales"] / rec["cost"], 6) if rec["cost"] else 0.0
 
-            cpc  = round(cost / clicks, 6) if clicks else 0.0
-            ctr  = round(clicks / impressions, 6) if impressions else 0.0
-            acos = round(cost / sales, 6) if sales else 0.0
-            roas = round(sales / cost, 6) if cost else 0.0
-
-            d = {
+            params = {
                 "profile_id": pid,
-                "date": row["date"],
-                "keyword_id": str(row.get("keywordId") or "0"),
-                "campaign_id": str(row.get("campaignId") or ""),
-                "campaign_name": row.get("campaignName") or "",
-                "ad_group_id": str(row.get("adGroupId") or ""),
-                "ad_group_name": row.get("adGroupName") or "",
-                "keyword_text": row.get("keywordText") or "",
-                "match_type": row.get("matchType") or "",
-                "impressions": impressions,
-                "clicks": clicks,
-                "cost": cost,
-                "sales": sales,
-                "orders": orders,
+                "date": rec["date"],
+                "keyword_id": rec["keyword_id"],
+                "campaign_id": rec["campaign_id"],
+                "campaign_name": rec["campaign_name"],
+                "ad_group_id": rec["ad_group_id"],
+                "ad_group_name": rec["ad_group_name"],
+                "keyword_text": rec["keyword_text"],
+                "match_type": rec["match_type"],
+                "impressions": rec["impressions"],
+                "clicks": rec["clicks"],
+                "cost": rec["cost"],
+                "sales": rec["sales"],
+                "orders": rec["orders"],
                 "cpc": cpc,
                 "ctr": ctr,
                 "acos": acos,
@@ -1314,7 +1301,7 @@ def sp_keywords_fetch(
                 "run_id": run_id,
             }
 
-            res = conn.execute(upsert_sql, d).first()
+            res = conn.execute(upsert_sql, params).first()
             if res and res[0] is True:
                 inserted += 1
             else:
