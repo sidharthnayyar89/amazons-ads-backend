@@ -1646,14 +1646,14 @@ def sp_search_terms_start(lookback_days: int = 2):
         "adProduct": "SPONSORED_PRODUCTS",
         "reportTypeId": "spSearchTerm",
         "timeUnit": "DAILY",
-        "groupBy": ["adGroup"],  # <- required
+        "groupBy": ["searchTerm"],  # <-- required by Amazon
         "columns": [
             "date",
             "campaignId","campaignName",
             "adGroupId","adGroupName",
             "searchTerm","matchType",
             "impressions","clicks","cost",
-            "attributedSales14d","attributedConversions14d"
+            "sales14d","purchases14d"  # <-- v3 names
         ],
         "format": "GZIP_JSON"
     }
