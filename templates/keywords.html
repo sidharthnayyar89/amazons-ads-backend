@@ -1,164 +1,194 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
   <title>Ads Console</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    * { box-sizing: border-box; }
-    body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:#111; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
     .wrap { display:flex; min-height:100vh; }
-    .sidebar {
-      width: 260px; background:#0f172a; color:#e5e7eb; padding:16px; position:sticky; top:0; height:100vh;
-    }
-    .brand { font-weight:700; margin-bottom:16px; font-size:18px; letter-spacing:.3px; }
-    .h1 { text-transform:uppercase; font-size:12px; color:#94a3b8; margin:20px 0 8px; }
-    .nav a {
-      display:block; padding:10px 12px; color:#e5e7eb; text-decoration:none; border-radius:8px; margin-bottom:6px;
-    }
-    .nav a.active, .nav a:hover { background:#1f2937; }
-    .main { flex:1; padding:20px; background:#f8fafc; }
-    .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
-    input, button, select {
-      padding:8px 10px; border:1px solid #cbd5e1; border-radius:8px; background:#fff;
-    }
+    .sidebar { width:260px; background:#0e1117; color:#fff; padding:20px; }
+    .sidebar h2 { margin:0 0 16px; font-size:18px; color:#9ccaff; }
+    .nav .section { margin-bottom:18px; }
+    .nav .section h3 { font-size:12px; color:#98a6c3; margin:10px 0 6px; text-transform:uppercase; letter-spacing:.06em; }
+    .nav a { display:block; padding:8px 10px; color:#dfe6f3; text-decoration:none; border-radius:6px; }
+    .nav a:hover { background:#1b2230; }
+    .nav a.active { background:#2a364a; color:#fff; }
+    .content { flex:1; padding:20px 24px; background:#f6f8fb; }
+    .controls { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
+    input, button { padding:8px 10px; border:1px solid #ccd6e5; border-radius:6px; background:#fff; }
     button { cursor:pointer; }
-    table { width:100%; border-collapse:collapse; background:#fff; border-radius:10px; overflow:hidden; }
-    th, td { padding:10px; border-bottom:1px solid #e5e7eb; text-align:left; font-size:13px; }
-    th { background:#f1f5f9; position:sticky; top:0; }
-    .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:12px; margin-bottom:16px; }
-    .muted { color:#475569; font-size:12px; }
+    table { width:100%; border-collapse:collapse; background:#fff; border-radius:8px; overflow:hidden; }
+    th, td { padding:8px 10px; border-bottom:1px solid #eef2f7; font-size:13px; text-align:left; }
+    th { background:#f2f6fb; color:#4a5a73; position:sticky; top:0; }
+    .muted { color:#6b7a90; }
+    .page-title { font-size:18px; font-weight:600; margin:6px 0 12px; }
   </style>
 </head>
 <body>
-<div class="wrap">
-  <aside class="sidebar">
-    <div class="brand">Your Ads Console</div>
-    <div class="h1">Advertising</div>
-    <div class="nav">
-      <a href="#keywords" id="nav-keywords">Keyword Data</a>
-      <a href="#searchterms" id="nav-searchterms">Search Terms</a>
-    </div>
-  </aside>
+  <div class="wrap">
+    <aside class="sidebar">
+      <h2>Advertising</h2>
+      <div class="nav">
+        <div class="section">
+          <h3>Pages</h3>
+          <a href="/ads/keywords" id="nav-keywords">Keyword Data</a>
+          <a href="/ads/search-terms" id="nav-search">Search Terms</a>
+        </div>
+      </div>
+    </aside>
 
-  <main class="main">
-    <div class="toolbar">
-      <label>Start: <input type="date" id="start"></label>
-      <label>End: <input type="date" id="end"></label>
-      <button id="loadBtn">Load</button>
-      <span class="muted" id="status"></span>
-    </div>
-    <div class="card">
-      <table id="dataTable">
-        <thead id="thead"></thead>
-        <tbody id="tbody"></tbody>
-      </table>
-    </div>
-  </main>
-</div>
+    <main class="content">
+      <div class="controls">
+        <label>Start <input id="start" type="date"/></label>
+        <label>End <input id="end" type="date"/></label>
+        <button onclick="loadPage()">Load</button>
+        <span id="status" class="muted"></span>
+      </div>
+
+      <div class="page-title" id="page-title"></div>
+
+      <!-- Keyword page -->
+      <div id="page-keywords" style="display:none;">
+        <table id="tbl-keywords">
+          <thead>
+            <tr>
+              <th>Date</th><th>Campaign</th><th>Ad Group</th><th>Keyword</th><th>Match</th>
+              <th>Impr</th><th>Clicks</th><th>Cost</th><th>Sales</th><th>Orders</th>
+              <th>CPC</th><th>CTR</th><th>ACOS</th><th>ROAS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- Search Terms page -->
+      <div id="page-search" style="display:none;">
+        <table id="tbl-search">
+          <thead>
+            <tr>
+              <th>Date</th><th>Campaign</th><th>Ad Group</th><th>Search Term</th><th>Keyword</th><th>Match</th>
+              <th>Impr</th><th>Clicks</th><th>Cost</th><th>Sales</th><th>Orders</th>
+              <th>CPC</th><th>CTR</th><th>ACOS</th><th>ROAS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
 
 <script>
-  const thead = document.getElementById('thead');
-  const tbody = document.getElementById('tbody');
-  const statusEl = document.getElementById('status');
-  const navKeywords = document.getElementById('nav-keywords');
-  const navSearch = document.getElementById('nav-searchterms');
-  const startEl = document.getElementById('start');
-  const endEl = document.getElementById('end');
+function iso(d){ return d.toISOString().slice(0,10); }
+function setDefaults() {
+  const end = new Date();
+  const start = new Date(); start.setDate(end.getDate()-1);
+  document.getElementById('start').value = iso(start);
+  document.getElementById('end').value = iso(end);
+}
+function fmt(n){ return (typeof n==='number') ? n.toLocaleString(undefined,{maximumFractionDigits:2}) : n; }
 
-  // default to the last 2 days
-  const today = new Date();
-  const yday = new Date(today.getTime() - 86400000);
-  const d2 = new Date(today.getTime() - 2*86400000);
-  startEl.value = d2.toISOString().slice(0,10);
-  endEl.value = yday.toISOString().slice(0,10);
+function activateNav(path) {
+  document.getElementById('nav-keywords').classList.toggle('active', path==='/ads/keywords');
+  document.getElementById('nav-search').classList.toggle('active', path==='/ads/search-terms');
+}
 
-  function setActive(hash) {
-    navKeywords.classList.toggle('active', hash === '#keywords');
-    navSearch.classList.toggle('active', hash === '#searchterms');
+function showPage(path){
+  const title = document.getElementById('page-title');
+  const kw = document.getElementById('page-keywords');
+  const st = document.getElementById('page-search');
+
+  if (path === '/ads/search-terms') {
+    title.textContent = 'Advertising / Search Terms';
+    kw.style.display = 'none';
+    st.style.display = 'block';
+  } else {
+    title.textContent = 'Advertising / Keyword Data';
+    kw.style.display = 'block';
+    st.style.display = 'none';
   }
+  activateNav(path);
+}
 
-  function currentView() {
-    return (location.hash === '#searchterms') ? 'searchterms' : 'keywords';
-  }
+async function loadPage(){
+  const s = document.getElementById('start').value;
+  const e = document.getElementById('end').value;
+  const status = document.getElementById('status');
+  const path = window.location.pathname;
 
-  function columnsFor(view) {
-    if (view === 'searchterms') {
-      return [
-        'date','campaign_name','ad_group_name','search_term',
-        'keyword_text','match_type','impressions','clicks','cost','sales','orders','cpc','ctr','acos','roas'
-      ];
-    }
-    // keywords
-    return [
-      'date','campaign_name','ad_group_name','keyword_text',
-      'match_type','impressions','clicks','cost','sales','orders','cpc','ctr','acos','roas'
-    ];
-  }
+  try{
+    status.textContent = 'Loading...';
 
-  async function loadData() {
-    const s = startEl.value;
-    const e = endEl.value;
-    const view = currentView();
-    setActive('#' + view);
-
-    let url;
-    if (view === 'searchterms') {
-      url = `/api/sp/searchterms_range?start=${s}&end=${e}&limit=1000`;
+    if (path === '/ads/search-terms') {
+      const r = await fetch(`/api/sp/st_range?start=${s}&end=${e}&limit=1000`);
+      const rows = await r.json();
+      const tb = document.querySelector('#tbl-search tbody');
+      tb.innerHTML = '';
+      rows.forEach(x=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${x.date}</td>
+          <td>${x.campaign_name}</td>
+          <td>${x.ad_group_name}</td>
+          <td>${x.search_term}</td>
+          <td>${x.keyword_text ?? ''}</td>
+          <td>${x.match_type}</td>
+          <td>${fmt(x.impressions)}</td>
+          <td>${fmt(x.clicks)}</td>
+          <td>${fmt(x.cost)}</td>
+          <td>${fmt(x.attributed_sales_14d)}</td>
+          <td>${fmt(x.attributed_conversions_14d)}</td>
+          <td>${fmt(x.cpc)}</td>
+          <td>${fmt(x.ctr)}</td>
+          <td>${fmt(x.acos)}</td>
+          <td>${fmt(x.roas)}</td>
+        `;
+        tb.appendChild(tr);
+      });
     } else {
-      url = `/api/sp/keywords_range?start=${s}&end=${e}&limit=1000`;
+      const r = await fetch(`/api/sp/keywords_range?start=${s}&end=${e}&limit=1000`);
+      const rows = await r.json();
+      const tb = document.querySelector('#tbl-keywords tbody');
+      tb.innerHTML = '';
+      rows.forEach(x=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${x.pulled_at || x.date || ''}</td>
+          <td>${x.campaign_name}</td>
+          <td>${x.ad_group_name}</td>
+          <td>${x.keyword_text}</td>
+          <td>${x.match_type}</td>
+          <td>${fmt(x.metrics?.impressions ?? x.impressions)}</td>
+          <td>${fmt(x.metrics?.clicks ?? x.clicks)}</td>
+          <td>${fmt(x.metrics?.spend ?? x.cost)}</td>
+          <td>${fmt(x.metrics?.sales ?? x.attributed_sales_14d)}</td>
+          <td>${fmt(x.metrics?.orders ?? x.attributed_conversions_14d)}</td>
+          <td>${fmt(x.metrics?.cpc ?? x.cpc)}</td>
+          <td>${fmt(x.metrics?.ctr ?? x.ctr)}</td>
+          <td>${fmt(x.metrics?.acos ?? x.acos)}</td>
+          <td>${fmt(x.metrics?.roas ?? x.roas)}</td>
+        `;
+        tb.appendChild(tr);
+      });
     }
 
-    statusEl.textContent = 'Loading...';
-    tbody.innerHTML = '';
-    try {
-      const res = await fetch(url);
-      const data = await res.json();
-
-      const cols = columnsFor(view);
-      thead.innerHTML = '<tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '</tr>';
-
-      const fmt = n => (typeof n === 'number' ? n.toLocaleString() : (n ?? ''));
-
-      // data for keywords_range returns an array of objects with nested metrics in your earlier endpoint;
-      // searchterms_range returns flat dicts (we return dict(r)).
-      for (const row of data) {
-        const flat = row.metrics ? {
-          date: row.pulled_at, // not ideal; keywords_range returns date inside DB row; you can expose it similarly
-          campaign_name: row.campaign_name,
-          ad_group_name: row.ad_group_name,
-          keyword_text: row.keyword_text,
-          match_type: row.match_type,
-          impressions: row.metrics.impressions,
-          clicks: row.metrics.clicks,
-          cost: row.metrics.spend,
-          sales: row.metrics.sales,
-          orders: row.metrics.orders,
-          cpc: row.metrics.cpc,
-          ctr: row.metrics.ctr,
-          acos: row.metrics.acos,
-          roas: row.metrics.roas,
-          search_term: row.search_term || ''
-        } : row;
-
-        const tds = columnsFor(view).map(k => `<td>${fmt(flat[k])}</td>`).join('');
-        tbody.insertAdjacentHTML('beforeend', `<tr>${tds}</tr>`);
-      }
-
-      statusEl.textContent = `Rows: ${data.length}`;
-    } catch (err) {
-      console.error(err);
-      statusEl.textContent = 'Error loading data';
-    }
+    status.textContent = '';
+  }catch(err){
+    console.error(err);
+    status.textContent = 'Error loading.';
   }
+}
 
-  document.getElementById('loadBtn').addEventListener('click', loadData);
-  window.addEventListener('hashchange', loadData);
-
-  // set default view
-  if (!location.hash) location.hash = '#keywords';
-  setActive(location.hash);
-  loadData();
+(function boot(){
+  // Redirect "/" to the default page
+  if (window.location.pathname === '/') {
+    window.location.replace('/ads/keywords');
+    return;
+  }
+  setDefaults();
+  showPage(window.location.pathname);
+  loadPage();
+})();
 </script>
 </body>
 </html>
