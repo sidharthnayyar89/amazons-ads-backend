@@ -151,35 +151,21 @@ def st_counts_safe():
 
 @app.get("/api/debug/st_head")
 def st_head(limit: int = 20):
-    try:
-        if not engine:
-            raise HTTPException(status_code=500, detail="Database not configured")
-        pid = _env("AMZN_PROFILE_ID")
-        with engine.begin() as conn:
-            rows = conn.execute(text("""
-                SELECT
-                  date, campaign_name, ad_group_name, search_term, match_type,
-                  impressions, clicks, cost, sales14d, purchases14d
-                FROM fact_sp_search_term_daily
-                WHERE profile_id = :pid
-                ORDER BY date DESC, campaign_name, ad_group_name, search_term
-                LIMIT :lim
-            """), {"pid": pid, "lim": limit}).mappings().all()
-
-        out = []
-        for r in rows:
-            d = dict(r)
-            d["date"] = r["date"].isoformat()
-            d["impressions"] = int(d["impressions"])
-            d["clicks"] = int(d["clicks"])
-            d["cost"] = float(d["cost"])
-            d["sales14d"] = float(d["sales14d"])
-            d["purchases14d"] = int(d["purchases14d"])
-            out.append(d)
-
-        return JSONResponse(content=out)
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    pid = _env("AMZN_PROFILE_ID")
+    q = text("""
+        SELECT
+          date, campaign_name, ad_group_name, search_term, match_type,
+          impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d
+        FROM fact_sp_search_term_daily
+        WHERE profile_id = :pid
+        ORDER BY date DESC, campaign_name, ad_group_name, search_term
+        LIMIT :lim
+    """)
+    with engine.begin() as conn:
+        rows = conn.execute(q, {"pid": pid, "lim": limit}).mappings().all()
+    return [dict(r) for r in rows]
 
 # ======================================================
 # DATA MODELS
@@ -1436,34 +1422,37 @@ def sp_counts():
         })
     return out
 
-@app.get("/api/debug/st_counts")
-def st_counts():
-    """Show daily counts & spend from fact_sp_search_term_daily."""
+@app.get("/api/debug/st_counts_safe")
+def st_counts_safe():
     if not engine:
         raise HTTPException(status_code=500, detail="Database not configured")
     pid = _env("AMZN_PROFILE_ID")
+    q = text("""
+        SELECT date,
+               COUNT(*) AS rows,
+               SUM(clicks) AS clicks,
+               SUM(cost) AS cost,
+               SUM(attributed_sales_14d) AS sales_14d,
+               SUM(attributed_conversions_14d) AS orders_14d
+        FROM fact_sp_search_term_daily
+        WHERE profile_id = :pid
+        GROUP BY date
+        ORDER BY date DESC
+        LIMIT 10
+    """)
     with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT 
-                date,
-                COUNT(*) AS rows,
-                SUM(clicks) AS clicks,
-                SUM(cost)   AS cost
-            FROM fact_sp_search_term_daily
-            WHERE profile_id = :pid
-            GROUP BY date
-            ORDER BY date DESC
-            LIMIT 30
-        """), {"pid": pid}).mappings().all()
-    return [
-        {
+        rows = conn.execute(q, {"pid": pid}).mappings().all()
+    out = []
+    for r in rows:
+        out.append({
             "date": r["date"].isoformat(),
             "rows": int(r["rows"]),
-            "clicks": int(r["clicks"]) if r["clicks"] else 0,
-            "cost": float(r["cost"]) if r["cost"] else 0.0,
-        }
-        for r in rows
-    ]
+            "clicks": int(r["clicks"] or 0),
+            "cost": float(r["cost"] or 0),
+            "sales_14d": float(r["sales_14d"] or 0),
+            "orders_14d": int(r["orders_14d"] or 0),
+        })
+    return out
 
 @app.post("/api/debug/create_st_table")
 def create_st_table():
