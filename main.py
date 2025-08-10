@@ -971,18 +971,24 @@ def sp_keywords_run(lookback_days: int = 2, background_tasks: BackgroundTasks = 
     return {"report_id": rid, "status": "PROCESSING", "start": str(start_date), "end": str(end_date)}
 
 from datetime import date as _date
+from fastapi import Query
 
 @app.get("/api/sp/keywords_range", response_model=List[KeywordRow])
-def sp_keywords_range(start: str, end: str, limit: int = 1000):
+def sp_keywords_range(
+    start: str,
+    end: str,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0)
+):
     """
     Returns stored keyword-day rows between [start, end] (inclusive).
     Dates must be YYYY-MM-DD.
+    Supports pagination via limit & offset.
     """
     if not engine:
         raise HTTPException(status_code=500, detail="Database not configured")
     profile_id = _env("AMZN_PROFILE_ID")
 
-    # Parse to real dates so we don't need SQL casts
     try:
         start_d = _date.fromisoformat(start)
         end_d = _date.fromisoformat(end)
@@ -1002,12 +1008,12 @@ def sp_keywords_range(start: str, end: str, limit: int = 1000):
       AND date >= :start_d
       AND date <= :end_d
     ORDER BY date DESC, campaign_name, ad_group_name, keyword_text
-    LIMIT :lim
+    LIMIT :lim OFFSET :off
     """
     with engine.begin() as conn:
         rows = conn.execute(
             text(q),
-            {"pid": profile_id, "start_d": start_d, "end_d": end_d, "lim": limit},
+            {"pid": profile_id, "start_d": start_d, "end_d": end_d, "lim": limit, "off": offset},
         ).mappings().all()
 
     out: List[KeywordRow] = []
