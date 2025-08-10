@@ -1639,24 +1639,25 @@ def sp_search_terms_start(lookback_days: int = 2):
 
     # 3) correct configuration for SP Search Terms (no groupBy)
     create_body = {
-        "name": f"spSearchTerm_{_ymd(start_date)}_{_ymd(end_date)}",
-        "startDate": _ymd(start_date),
-        "endDate": _ymd(end_date),
-        "configuration": {
-            "adProduct": "SPONSORED_PRODUCTS",
-            "reportTypeId": "spSearchTerm",  # <- THIS is the key bit
-            "timeUnit": "DAILY",
-            "columns": [
-                "date",
-                "campaignId", "campaignName",
-                "adGroupId", "adGroupName",
-                "searchTerm", "matchType",
-                "impressions", "clicks", "cost",
-                "attributedSales14d", "attributedConversions14d"
-            ],
-            "format": "GZIP_JSON"
-        }
+    "name": f"spSearchTerm_{_ymd(start_date)}_{_ymd(end_date)}",
+    "startDate": _ymd(start_date),
+    "endDate": _ymd(end_date),
+    "configuration": {
+        "adProduct": "SPONSORED_PRODUCTS",
+        "reportTypeId": "spSearchTerm",
+        "timeUnit": "DAILY",
+        "groupBy": ["adGroup"],  # <- required
+        "columns": [
+            "date",
+            "campaignId","campaignName",
+            "adGroupId","adGroupName",
+            "searchTerm","matchType",
+            "impressions","clicks","cost",
+            "attributedSales14d","attributedConversions14d"
+        ],
+        "format": "GZIP_JSON"
     }
+}
 
     # 4) create report; handle duplicate (HTTP 425) gracefully
     with httpx.Client(timeout=60) as client:
