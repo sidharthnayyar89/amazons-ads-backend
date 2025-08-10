@@ -24,80 +24,64 @@ if DB_URL:
 engine = create_engine(DB_URL, pool_pre_ping=True) if DB_URL else None
 
 def init_db():
-    if not engine:
-        return
     ddl = """
-    CREATE TABLE IF NOT EXISTS fact_sp_keyword_daily (
-      profile_id     text NOT NULL,
-      date           date NOT NULL,
-      keyword_id     text NOT NULL,
-
-      campaign_id    text NOT NULL,
-      campaign_name  text NOT NULL,
-      ad_group_id    text NOT NULL,
-      ad_group_name  text NOT NULL,
-      keyword_text   text NOT NULL,
-      match_type     text NOT NULL,
-
-      impressions    integer NOT NULL,
-      clicks         integer NOT NULL,
-      cost           numeric(18,4) NOT NULL,
-      attributed_sales_14d numeric(18,4) NOT NULL,
-      attributed_conversions_14d integer NOT NULL,
-
-      -- derived
-      cpc            numeric(18,4) NOT NULL,
-      ctr            numeric(18,6) NOT NULL,
-      acos           numeric(18,6) NOT NULL,
-      roas           numeric(18,6) NOT NULL,
-
-      run_id         uuid NOT NULL,
-      pulled_at      timestamptz NOT NULL DEFAULT now(),
-
-      CONSTRAINT uq_fact UNIQUE(profile_id, date, keyword_id)
+    CREATE TABLE IF NOT EXISTS fact_sp_keywords_daily (
+        profile_id     text NOT NULL,
+        date           date NOT NULL,
+        keyword_id     text NOT NULL,
+        campaign_id    text NOT NULL,
+        campaign_name  text NOT NULL,
+        ad_group_id    text NOT NULL,
+        ad_group_name  text NOT NULL,
+        keyword_text   text NOT NULL,
+        match_type     text NOT NULL,
+        impressions    integer NOT NULL,
+        clicks         integer NOT NULL,
+        cost           numeric(18,4) NOT NULL,
+        attributed_sales_14d numeric(18,4) NOT NULL,
+        attributed_conversions_14d integer NOT NULL,
+        cpc            numeric(18,6) NOT NULL,
+        ctr            numeric(18,6) NOT NULL,
+        acos           numeric(18,6) NOT NULL,
+        roas           numeric(18,6) NOT NULL,
+        run_id         uuid NOT NULL,
+        pulled_at      timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT uq_kw UNIQUE(profile_id, date, keyword_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_fact_profile_date ON fact_sp_keyword_daily(profile_id, date);
-    CREATE INDEX IF NOT EXISTS idx_fact_keyword_date ON fact_sp_keyword_daily(keyword_id, date);
+    CREATE INDEX IF NOT EXISTS idx_kw_profile_date ON fact_sp_keywords_daily(profile_id, date);
+    CREATE INDEX IF NOT EXISTS idx_kw_keyword_date ON fact_sp_keywords_daily(keyword_text, date);
+
+    CREATE TABLE IF NOT EXISTS fact_sp_search_term_daily (
+        profile_id     text NOT NULL,
+        date           date NOT NULL,
+        campaign_id    text NOT NULL,
+        campaign_name  text NOT NULL,
+        ad_group_id    text NOT NULL,
+        ad_group_name  text NOT NULL,
+        search_term    text NOT NULL,
+        keyword_id     text,
+        keyword_text   text,
+        match_type     text NOT NULL,
+        impressions    integer NOT NULL,
+        clicks         integer NOT NULL,
+        cost           numeric(18,4) NOT NULL,
+        attributed_sales_14d numeric(18,4) NOT NULL,
+        attributed_conversions_14d integer NOT NULL,
+        cpc            numeric(18,6) NOT NULL,
+        ctr            numeric(18,6) NOT NULL,
+        acos           numeric(18,6) NOT NULL,
+        roas           numeric(18,6) NOT NULL,
+        run_id         uuid NOT NULL,
+        pulled_at      timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT uq_st UNIQUE(profile_id, date, ad_group_id, search_term)
+    );
+    CREATE INDEX IF NOT EXISTS idx_st_profile_date ON fact_sp_search_term_daily(profile_id, date);
+    CREATE INDEX IF NOT EXISTS idx_st_term_date ON fact_sp_search_term_daily(search_term, date);
     """
+
+    from sqlalchemy import text
     with engine.begin() as conn:
-        conn.exec_driver_sql(ddl)
-
-CREATE TABLE IF NOT EXISTS fact_sp_search_term_daily (
-  profile_id     text NOT NULL,
-  date           date NOT NULL,
-
-  campaign_id    text NOT NULL,
-  campaign_name  text NOT NULL,
-  ad_group_id    text NOT NULL,
-  ad_group_name  text NOT NULL,
-
-  -- search term + (optional) keyword context
-  search_term    text NOT NULL,
-  keyword_id     text,
-  keyword_text   text,
-  match_type     text NOT NULL,
-
-  impressions    integer NOT NULL,
-  clicks         integer NOT NULL,
-  cost           numeric(18,4) NOT NULL,
-  attributed_sales_14d numeric(18,4) NOT NULL,
-  attributed_conversions_14d integer NOT NULL,
-
-  -- derived
-  cpc            numeric(18,6) NOT NULL,
-  ctr            numeric(18,6) NOT NULL,
-  acos           numeric(18,6) NOT NULL,
-  roas           numeric(18,6) NOT NULL,
-
-  run_id         uuid NOT NULL,
-  pulled_at      timestamptz NOT NULL DEFAULT now(),
-
-  CONSTRAINT uq_st UNIQUE(profile_id, date, ad_group_id, search_term)
-);
-CREATE INDEX IF NOT EXISTS idx_st_profile_date ON fact_sp_search_term_daily(profile_id, date);
-CREATE INDEX IF NOT EXISTS idx_st_term_date ON fact_sp_search_term_daily(search_term, date);
-
-init_db()
+        conn.exec_driver_sql(text(ddl))
 
 # ======================================================
 # APP SETUP
