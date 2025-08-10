@@ -102,6 +102,85 @@ templates = Jinja2Templates(directory="templates")
 def ui_keywords(request: Request):
     return templates.TemplateResponse("keywords.html", {"request": request})
 
+# --- ultra-safe debug for Search Term table ---
+
+from fastapi.responses import JSONResponse
+
+@app.get("/api/debug/tables")
+def debug_tables():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT table_schema AS schema, table_name AS table
+            FROM information_schema.tables
+            WHERE table_schema='public'
+            ORDER BY 1,2
+        """)).mappings().all()
+    return JSONResponse(content=[dict(r) for r in rows])
+
+@app.get("/api/debug/st_counts_safe")
+def st_counts_safe():
+    try:
+        if not engine:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        pid = _env("AMZN_PROFILE_ID")
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT date,
+                       COUNT(*) AS rows,
+                       COALESCE(SUM(clicks),0) AS clicks,
+                       COALESCE(SUM(cost),0)   AS cost
+                FROM fact_sp_search_term_daily
+                WHERE profile_id = :pid
+                GROUP BY date
+                ORDER BY date DESC
+                LIMIT 10
+            """), {"pid": pid}).mappings().all()
+
+        out = [{
+            "date": r["date"].isoformat(),
+            "rows": int(r["rows"] or 0),
+            "clicks": int(r["clicks"] or 0),
+            "cost": float(r["cost"] or 0.0),
+        } for r in rows]
+        return JSONResponse(content=out)
+    except Exception as e:
+        # Make any error visible as JSON so we don’t get a square
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/api/debug/st_head")
+def st_head(limit: int = 20):
+    try:
+        if not engine:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        pid = _env("AMZN_PROFILE_ID")
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT
+                  date, campaign_name, ad_group_name, search_term, match_type,
+                  impressions, clicks, cost, sales14d, purchases14d
+                FROM fact_sp_search_term_daily
+                WHERE profile_id = :pid
+                ORDER BY date DESC, campaign_name, ad_group_name, search_term
+                LIMIT :lim
+            """), {"pid": pid, "lim": limit}).mappings().all()
+
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["date"] = r["date"].isoformat()
+            d["impressions"] = int(d["impressions"])
+            d["clicks"] = int(d["clicks"])
+            d["cost"] = float(d["cost"])
+            d["sales14d"] = float(d["sales14d"])
+            d["purchases14d"] = int(d["purchases14d"])
+            out.append(d)
+
+        return JSONResponse(content=out)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 # ======================================================
 # DATA MODELS
 # ======================================================
