@@ -1071,6 +1071,51 @@ def sp_counts():
         })
     return out
 
+@app.get("/api/debug/report_head")
+def debug_report_head(report_id: str):
+    """Quick test: fetch first few rows from Amazon report without DB insert."""
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    # 1) Get report status & presigned URL
+    status_url = f"{ads_base}/reporting/reports/{report_id}"
+    with httpx.Client(timeout=60) as client:
+        r = client.get(status_url, headers=headers)
+        r.raise_for_status()
+        meta = r.json()
+        url = meta.get("url")
+        if not url:
+            return {"stage": "check_report", "meta": meta}
+
+    # 2) Download with no headers
+    import urllib.request, gzip, io, json
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        raw_bytes = resp.read()
+
+    # 3) Gunzip if needed
+    try:
+        buf = io.BytesIO(raw_bytes)
+        with gzip.GzipFile(fileobj=buf) as gz:
+            raw_text = gz.read().decode("utf-8")
+    except OSError:
+        raw_text = raw_bytes.decode("utf-8", errors="ignore")
+
+    # 4) Return just first 5 lines/objects
+    sample = []
+    for line in raw_text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            sample.append(json.loads(line))
+        except Exception:
+            pass
+        if len(sample) >= 5:
+            break
+
+    return {"stage": "ok", "sample": sample}
+
 # -------------------------------
 # PERMANENT INGEST: fetch & upsert (headerless S3 download)
 # -------------------------------
