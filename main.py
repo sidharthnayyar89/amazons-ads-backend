@@ -1386,6 +1386,76 @@ def st_counts():
         for r in rows
     ]
 
+# --- DEBUG: list tables
+@app.get("/api/debug/tables")
+def list_tables():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT schemaname, tablename
+            FROM pg_catalog.pg_tables
+            WHERE schemaname NOT IN ('pg_catalog','information_schema')
+            ORDER BY schemaname, tablename
+        """)).mappings().all()
+    return [{"schema": r["schemaname"], "table": r["tablename"]} for r in rows]
+
+# --- DEBUG: safer st_counts (returns error details instead of 500)
+@app.get("/api/debug/st_counts_safe")
+def st_counts_safe():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    pid = _env("AMZN_PROFILE_ID")
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT date,
+                       COUNT(*) AS rows,
+                       COALESCE(SUM(clicks),0) AS clicks,
+                       COALESCE(SUM(cost),0)   AS cost
+                FROM fact_sp_search_term_daily
+                WHERE profile_id = :pid
+                GROUP BY date
+                ORDER BY date DESC
+                LIMIT 10
+            """), {"pid": pid}).mappings().all()
+        out = []
+        for r in rows:
+            out.append({
+                "date": r["date"].isoformat(),
+                "rows": int(r["rows"]),
+                "clicks": int(r["clicks"]),
+                "cost": float(r["cost"]),
+            })
+        return out
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+
+# --- DEBUG: peek first few ST rows
+@app.get("/api/debug/st_head")
+def st_head(limit: int = 20):
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    pid = _env("AMZN_PROFILE_ID")
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT *
+            FROM fact_sp_search_term_daily
+            WHERE profile_id = :pid
+            ORDER BY date DESC
+            LIMIT :lim
+        """), {"pid": pid, "lim": limit}).mappings().all()
+    # return raw rows so we see actual column names present
+    def _to_jsonable(m):
+        j = dict(m)
+        if hasattr(j.get("pulled_at"), "isoformat"):
+            j["pulled_at"] = j["pulled_at"].isoformat()
+        if hasattr(j.get("date"), "isoformat"):
+            j["date"] = j["date"].isoformat()
+        return j
+    return [_to_jsonable(r) for r in rows]
+
 @app.get("/api/debug/report_head")
 def debug_report_head(report_id: str):
     """Quick test: fetch first few rows from Amazon report without DB insert."""
