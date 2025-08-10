@@ -1386,6 +1386,52 @@ def st_counts():
         for r in rows
     ]
 
+@app.post("/api/debug/create_st_table")
+def create_st_table():
+    """
+    Create the Sponsored Products Search Term daily fact table if it doesn't exist.
+    """
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    ddl = """
+    CREATE TABLE IF NOT EXISTS fact_sp_search_term_daily (
+      profile_id     text NOT NULL,
+      date           date NOT NULL,
+      -- grain: a search term performance row is scoped by campaign/ad_group/day
+      search_term    text NOT NULL,
+      match_type     text NOT NULL,
+
+      campaign_id    text NOT NULL,
+      campaign_name  text NOT NULL,
+      ad_group_id    text NOT NULL,
+      ad_group_name  text NOT NULL,
+
+      impressions    integer NOT NULL,
+      clicks         integer NOT NULL,
+      cost           numeric(18,4) NOT NULL,
+      attributed_sales_14d        numeric(18,4) NOT NULL,
+      attributed_conversions_14d  integer NOT NULL,
+
+      -- derived
+      cpc            numeric(18,6) NOT NULL,
+      ctr            numeric(18,6) NOT NULL,
+      acos           numeric(18,6) NOT NULL,
+      roas           numeric(18,6) NOT NULL,
+
+      run_id         uuid NOT NULL,
+      pulled_at      timestamptz NOT NULL DEFAULT now(),
+
+      CONSTRAINT uq_st_fact UNIQUE (profile_id, date, campaign_id, ad_group_id, search_term, match_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_st_profile_date ON fact_sp_search_term_daily(profile_id, date);
+    CREATE INDEX IF NOT EXISTS idx_st_term_date ON fact_sp_search_term_daily(search_term, date);
+    """
+    with engine.begin() as conn:
+        conn.exec_driver_sql(ddl)
+
+    return {"ok": True, "table": "fact_sp_search_term_daily"}
+
 # --- DEBUG: list tables
 @app.get("/api/debug/tables")
 def list_tables():
