@@ -1830,12 +1830,12 @@ def sp_search_terms_fetch(
             except Exception:
                 pass
 
-    # 5) upsert
-    pid = _env("AMZN_PROFILE_ID")
-    run_id = str(_uuid.uuid4())
-    inserted = updated = processed = 0
+  # 5) upsert
+pid = _env("AMZN_PROFILE_ID")
+run_id = str(_uuid.uuid4())
+inserted = updated = processed = 0
 
-    upsert_sql = _text("""
+upsert_sql = _text("""
     INSERT INTO fact_sp_search_term_daily (
         profile_id, date,
         campaign_id, campaign_name,
@@ -1876,43 +1876,43 @@ def sp_search_terms_fetch(
     RETURNING xmax = 0 AS inserted_flag
 """)
 
-    with engine.begin() as conn:
-        for rec in iter_records(raw_text):
-            # map fields from report
-           d = {
-    "profile_id": pid,
-    "date": (rec.get("date") or "")[:10],
-    "campaign_id": str(rec.get("campaignId") or ""),
-    "campaign_name": rec.get("campaignName") or "",
-    "ad_group_id": str(rec.get("adGroupId") or ""),
-    "ad_group_name": rec.get("adGroupName") or "",
-    "search_term": rec.get("searchTerm") or "",
-    "keyword_id": str(rec.get("keywordId") or "") or None,
-    "keyword_text": rec.get("keywordText") or None,
-    "match_type": rec.get("matchType") or "",
-    "impressions": int(rec.get("impressions") or 0),
-    "clicks": int(rec.get("clicks") or 0),
-    "cost": float(rec.get("cost") or 0.0),
-    "attributed_sales_14d": float(rec.get("sales14d") or 0.0),
-    "attributed_conversions_14d": int(rec.get("purchases14d") or 0),
-    "run_id": run_id,
-}
-# derived
-d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
-d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
-d["acos"] = round(d["cost"] / d["attributed_sales_14d"], 6) if d["attributed_sales_14d"] else 0.0
-d["roas"] = round(d["attributed_sales_14d"] / d["cost"], 6) if d["cost"] else 0.0
+with engine.begin() as conn:
+    for rec in iter_records(raw_text):
+        # map fields from report
+        d = {
+            "profile_id": pid,
+            "date": (rec.get("date") or "")[:10],
+            "campaign_id": str(rec.get("campaignId") or ""),
+            "campaign_name": rec.get("campaignName") or "",
+            "ad_group_id": str(rec.get("adGroupId") or ""),
+            "ad_group_name": rec.get("adGroupName") or "",
+            "search_term": rec.get("searchTerm") or "",
+            "keyword_id": (str(rec.get("keywordId") or "") or None),
+            "keyword_text": rec.get("keywordText") or None,
+            "match_type": rec.get("matchType") or "",
+            "impressions": int(rec.get("impressions") or 0),
+            "clicks": int(rec.get("clicks") or 0),
+            "cost": float(rec.get("cost") or 0.0),
+            # NOTE: this block expects v3 names sales14d/purchases14d; if your file uses
+            # attributed*14d, adapt here accordingly.
+            "attributed_sales_14d": float(rec.get("sales14d") or 0.0),
+            "attributed_conversions_14d": int(rec.get("purchases14d") or 0),
+            "run_id": run_id,
+        }
+        # derived
+        d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
+        d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
+        d["acos"] = round(d["cost"] / d["attributed_sales_14d"], 6) if d["attributed_sales_14d"] else 0.0
+        d["roas"] = round(d["attributed_sales_14d"] / d["cost"], 6) if d["cost"] else 0.0
 
-            res = conn.execute(upsert_sql, d).first()
-            if res and res[0] is True:
-                inserted += 1
-            else:
-                updated += 1
+        res = conn.execute(upsert_sql, d).first()
+        if res and res[0] is True:
+            inserted += 1
+        else:
+            updated += 1
 
-            processed += 1
-            if processed >= limit:
-                break
+        processed += 1
+        if processed >= limit:
+            break
 
-    return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
-
-
+return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
