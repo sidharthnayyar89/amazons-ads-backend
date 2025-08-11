@@ -23,7 +23,7 @@ if DB_URL:
 
 engine = create_engine(DB_URL, pool_pre_ping=True) if DB_URL else None
 
-   def init_db():
+def init_db():
     if not engine:
         return
     ddl = """
@@ -462,7 +462,7 @@ def sp_keywords_live(lookback_days: int = 14, buffer_days: int = 1, limit: int =
     headers = _ads_headers(access)
 
     # helper for dates
-    def _ymd(d: datetime.date) -> str:
+def _ymd(d: datetime.date) -> str:
         return d.strftime("%Y-%m-%d")
 
     # 3) create report job (Reports v3)
