@@ -23,65 +23,76 @@ if DB_URL:
 
 engine = create_engine(DB_URL, pool_pre_ping=True) if DB_URL else None
 
-def init_db():
+   def init_db():
+    if not engine:
+        return
     ddl = """
-    CREATE TABLE IF NOT EXISTS fact_sp_keywords_daily (
-        profile_id     text NOT NULL,
-        date           date NOT NULL,
-        keyword_id     text NOT NULL,
-        campaign_id    text NOT NULL,
-        campaign_name  text NOT NULL,
-        ad_group_id    text NOT NULL,
-        ad_group_name  text NOT NULL,
-        keyword_text   text NOT NULL,
-        match_type     text NOT NULL,
-        impressions    integer NOT NULL,
-        clicks         integer NOT NULL,
-        cost           numeric(18,4) NOT NULL,
-        attributed_sales_14d numeric(18,4) NOT NULL,
-        attributed_conversions_14d integer NOT NULL,
-        cpc            numeric(18,6) NOT NULL,
-        ctr            numeric(18,6) NOT NULL,
-        acos           numeric(18,6) NOT NULL,
-        roas           numeric(18,6) NOT NULL,
-        run_id         uuid NOT NULL,
-        pulled_at      timestamptz NOT NULL DEFAULT now(),
-        CONSTRAINT uq_kw UNIQUE(profile_id, date, keyword_id)
+    CREATE TABLE IF NOT EXISTS fact_sp_keyword_daily (
+      profile_id     text NOT NULL,
+      date           date NOT NULL,
+      keyword_id     text NOT NULL,
+
+      campaign_id    text NOT NULL,
+      campaign_name  text NOT NULL,
+      ad_group_id    text NOT NULL,
+      ad_group_name  text NOT NULL,
+      keyword_text   text NOT NULL,
+      match_type     text NOT NULL,
+
+      impressions    integer NOT NULL,
+      clicks         integer NOT NULL,
+      cost           numeric(18,4) NOT NULL,
+      attributed_sales_14d numeric(18,4) NOT NULL,
+      attributed_conversions_14d integer NOT NULL,
+
+      cpc            numeric(18,6) NOT NULL,
+      ctr            numeric(18,6) NOT NULL,
+      acos           numeric(18,6) NOT NULL,
+      roas           numeric(18,6) NOT NULL,
+
+      run_id         uuid NOT NULL,
+      pulled_at      timestamptz NOT NULL DEFAULT now(),
+
+      CONSTRAINT uq_fact_kw UNIQUE(profile_id, date, keyword_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_kw_profile_date ON fact_sp_keywords_daily(profile_id, date);
-    CREATE INDEX IF NOT EXISTS idx_kw_keyword_date ON fact_sp_keywords_daily(keyword_text, date);
+    CREATE INDEX IF NOT EXISTS idx_fact_kw_profile_date ON fact_sp_keyword_daily(profile_id, date);
+    CREATE INDEX IF NOT EXISTS idx_fact_kw_keyword_date ON fact_sp_keyword_daily(keyword_id, date);
 
     CREATE TABLE IF NOT EXISTS fact_sp_search_term_daily (
-        profile_id     text NOT NULL,
-        date           date NOT NULL,
-        campaign_id    text NOT NULL,
-        campaign_name  text NOT NULL,
-        ad_group_id    text NOT NULL,
-        ad_group_name  text NOT NULL,
-        search_term    text NOT NULL,
-        keyword_id     text,
-        keyword_text   text,
-        match_type     text NOT NULL,
-        impressions    integer NOT NULL,
-        clicks         integer NOT NULL,
-        cost           numeric(18,4) NOT NULL,
-        attributed_sales_14d numeric(18,4) NOT NULL,
-        attributed_conversions_14d integer NOT NULL,
-        cpc            numeric(18,6) NOT NULL,
-        ctr            numeric(18,6) NOT NULL,
-        acos           numeric(18,6) NOT NULL,
-        roas           numeric(18,6) NOT NULL,
-        run_id         uuid NOT NULL,
-        pulled_at      timestamptz NOT NULL DEFAULT now(),
-        CONSTRAINT uq_st UNIQUE(profile_id, date, ad_group_id, search_term)
-    );
-    CREATE INDEX IF NOT EXISTS idx_st_profile_date ON fact_sp_search_term_daily(profile_id, date);
-    CREATE INDEX IF NOT EXISTS idx_st_term_date ON fact_sp_search_term_daily(search_term, date);
-    """
+      profile_id     text NOT NULL,
+      date           date NOT NULL,
 
-    from sqlalchemy import text
+      campaign_id    text NOT NULL,
+      campaign_name  text NOT NULL,
+      ad_group_id    text NOT NULL,
+      ad_group_name  text NOT NULL,
+
+      search_term    text NOT NULL,
+      keyword_id     text,
+      keyword_text   text,
+      match_type     text NOT NULL,
+
+      impressions    integer NOT NULL,
+      clicks         integer NOT NULL,
+      cost           numeric(18,4) NOT NULL,
+      attributed_sales_14d numeric(18,4) NOT NULL,
+      attributed_conversions_14d integer NOT NULL,
+
+      cpc            numeric(18,6) NOT NULL,
+      ctr            numeric(18,6) NOT NULL,
+      acos           numeric(18,6) NOT NULL,
+      roas           numeric(18,6) NOT NULL,
+
+      run_id         uuid NOT NULL,
+      pulled_at      timestamptz NOT NULL DEFAULT now(),
+
+      CONSTRAINT uq_fact_st UNIQUE(profile_id, date, ad_group_id, search_term, match_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fact_st_profile_date ON fact_sp_search_term_daily(profile_id, date);
+    CREATE INDEX IF NOT EXISTS idx_fact_st_term_date ON fact_sp_search_term_daily(search_term, date);
+    """
     with engine.begin() as conn:
-        conn.exec_driver_sql(text(ddl))
+        conn.exec_driver_sql(ddl)
 
 # ======================================================
 # APP SETUP
@@ -121,33 +132,32 @@ def debug_tables():
 
 @app.get("/api/debug/st_counts_safe")
 def st_counts_safe():
-    try:
-        if not engine:
-            raise HTTPException(status_code=500, detail="Database not configured")
-        pid = _env("AMZN_PROFILE_ID")
-        with engine.begin() as conn:
-            rows = conn.execute(text("""
-                SELECT date,
-                       COUNT(*) AS rows,
-                       COALESCE(SUM(clicks),0) AS clicks,
-                       COALESCE(SUM(cost),0)   AS cost
-                FROM fact_sp_search_term_daily
-                WHERE profile_id = :pid
-                GROUP BY date
-                ORDER BY date DESC
-                LIMIT 10
-            """), {"pid": pid}).mappings().all()
-
-        out = [{
-            "date": r["date"].isoformat(),
-            "rows": int(r["rows"] or 0),
-            "clicks": int(r["clicks"] or 0),
-            "cost": float(r["cost"] or 0.0),
-        } for r in rows]
-        return JSONResponse(content=out)
-    except Exception as e:
-        # Make any error visible as JSON so we don’t get a square
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    pid = _env("AMZN_PROFILE_ID")
+    q = text("""
+        SELECT date,
+               COUNT(*) AS rows,
+               COALESCE(SUM(clicks),0) AS clicks,
+               COALESCE(SUM(cost),0)   AS cost,
+               COALESCE(SUM(attributed_sales_14d),0) AS sales_14d,
+               COALESCE(SUM(attributed_conversions_14d),0) AS orders_14d
+        FROM fact_sp_search_term_daily
+        WHERE profile_id = :pid
+        GROUP BY date
+        ORDER BY date DESC
+        LIMIT 10
+    """)
+    with engine.begin() as conn:
+        rows = conn.execute(q, {"pid": pid}).mappings().all()
+    return [{
+        "date": r["date"].isoformat(),
+        "rows": int(r["rows"]),
+        "clicks": int(r["clicks"]),
+        "cost": float(r["cost"]),
+        "sales_14d": float(r["sales_14d"]),
+        "orders_14d": int(r["orders_14d"]),
+    } for r in rows]
 
 @app.get("/api/debug/st_head")
 def st_head(limit: int = 20):
@@ -155,9 +165,8 @@ def st_head(limit: int = 20):
         raise HTTPException(status_code=500, detail="Database not configured")
     pid = _env("AMZN_PROFILE_ID")
     q = text("""
-        SELECT
-          date, campaign_name, ad_group_name, search_term, match_type,
-          impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d
+        SELECT date, campaign_name, ad_group_name, search_term, match_type,
+               impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d
         FROM fact_sp_search_term_daily
         WHERE profile_id = :pid
         ORDER BY date DESC, campaign_name, ad_group_name, search_term
@@ -165,7 +174,34 @@ def st_head(limit: int = 20):
     """)
     with engine.begin() as conn:
         rows = conn.execute(q, {"pid": pid, "lim": limit}).mappings().all()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["date"] = r["date"].isoformat()
+        d["impressions"] = int(d["impressions"])
+        d["clicks"] = int(d["clicks"])
+        d["cost"] = float(d["cost"])
+        d["attributed_sales_14d"] = float(d["attributed_sales_14d"])
+        d["attributed_conversions_14d"] = int(d["attributed_conversions_14d"])
+        out.append(d)
+    return out
+
+@app.post("/api/debug/migrate_kw_table")
+def migrate_kw_table():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("""
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='fact_sp_keywords_daily') AND
+             NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='fact_sp_keyword_daily')
+          THEN
+            EXECUTE 'ALTER TABLE fact_sp_keywords_daily RENAME TO fact_sp_keyword_daily';
+          END IF;
+        END$$;
+        """)
+    return {"ok": True}
 
 # ======================================================
 # DATA MODELS
@@ -2153,70 +2189,72 @@ def sp_search_terms_fetch(
     inserted = updated = processed = 0
 
     upsert_sql = _text("""
-        INSERT INTO fact_sp_search_term_daily (
-            profile_id, date,
-            campaign_id, campaign_name,
-            ad_group_id, ad_group_name,
-            search_term, match_type,
-            impressions, clicks, cost, sales14d, purchases14d,
-            cpc, ctr, acos, roas,
-            run_id, pulled_at
-        )
-        VALUES (
-            :profile_id, :date,
-            :campaign_id, :campaign_name,
-            :ad_group_id, :ad_group_name,
-            :search_term, :match_type,
-            :impressions, :clicks, :cost, :sales14d, :purchases14d,
-            :cpc, :ctr, :acos, :roas,
-            :run_id, now()
-        )
-        ON CONFLICT (profile_id, date, search_term, ad_group_id) DO UPDATE SET
-            campaign_id = EXCLUDED.campaign_id,
-            campaign_name = EXCLUDED.campaign_name,
-            ad_group_id = EXCLUDED.ad_group_id,
-            ad_group_name = EXCLUDED.ad_group_name,
-            match_type = EXCLUDED.match_type,
-            impressions = EXCLUDED.impressions,
-            clicks = EXCLUDED.clicks,
-            cost = EXCLUDED.cost,
-            sales14d = EXCLUDED.sales14d,
-            purchases14d = EXCLUDED.purchases14d,
-            cpc = EXCLUDED.cpc,
-            ctr = EXCLUDED.ctr,
-            acos = EXCLUDED.acos,
-            roas = EXCLUDED.roas,
-            run_id = EXCLUDED.run_id,
-            pulled_at = now()
-        RETURNING xmax = 0 AS inserted_flag
-    """)
+    INSERT INTO fact_sp_search_term_daily (
+        profile_id, date,
+        campaign_id, campaign_name,
+        ad_group_id, ad_group_name,
+        search_term, keyword_id, keyword_text, match_type,
+        impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+        cpc, ctr, acos, roas,
+        run_id, pulled_at
+    )
+    VALUES (
+        :profile_id, :date,
+        :campaign_id, :campaign_name,
+        :ad_group_id, :ad_group_name,
+        :search_term, :keyword_id, :keyword_text, :match_type,
+        :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
+        :cpc, :ctr, :acos, :roas,
+        :run_id, now()
+    )
+    ON CONFLICT (profile_id, date, search_term, ad_group_id, match_type) DO UPDATE SET
+        campaign_id = EXCLUDED.campaign_id,
+        campaign_name = EXCLUDED.campaign_name,
+        ad_group_id = EXCLUDED.ad_group_id,
+        ad_group_name = EXCLUDED.ad_group_name,
+        keyword_id = EXCLUDED.keyword_id,
+        keyword_text = EXCLUDED.keyword_text,
+        match_type = EXCLUDED.match_type,
+        impressions = EXCLUDED.impressions,
+        clicks = EXCLUDED.clicks,
+        cost = EXCLUDED.cost,
+        attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+        attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+        cpc = EXCLUDED.cpc,
+        ctr = EXCLUDED.ctr,
+        acos = EXCLUDED.acos,
+        roas = EXCLUDED.roas,
+        run_id = EXCLUDED.run_id,
+        pulled_at = now()
+    RETURNING xmax = 0 AS inserted_flag
+""")
 
     with engine.begin() as conn:
         for rec in iter_records(raw_text):
             # map fields from report
-            d = {
-                "profile_id": pid,
-                "date": (rec.get("date") or "")[:10],
-                "campaign_id": str(rec.get("campaignId") or ""),
-                "campaign_name": rec.get("campaignName") or "",
-                "ad_group_id": str(rec.get("adGroupId") or ""),
-                "ad_group_name": rec.get("adGroupName") or "",
-                "search_term": rec.get("searchTerm") or "",
-                "match_type": rec.get("matchType") or "",
-                "impressions": int(rec.get("impressions") or 0),
-                "clicks": int(rec.get("clicks") or 0),
-                "cost": float(rec.get("cost") or 0.0),
-                "sales14d": float(rec.get("sales14d") or 0.0),
-                "purchases14d": int(rec.get("purchases14d") or 0),
-                "run_id": run_id,
-            }
-            if not d["date"]:
-                continue
-            # derived
-            d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
-            d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
-            d["acos"] = round(d["cost"] / d["sales14d"], 6) if d["sales14d"] else 0.0
-            d["roas"] = round(d["sales14d"] / d["cost"], 6) if d["cost"] else 0.0
+           d = {
+    "profile_id": pid,
+    "date": (rec.get("date") or "")[:10],
+    "campaign_id": str(rec.get("campaignId") or ""),
+    "campaign_name": rec.get("campaignName") or "",
+    "ad_group_id": str(rec.get("adGroupId") or ""),
+    "ad_group_name": rec.get("adGroupName") or "",
+    "search_term": rec.get("searchTerm") or "",
+    "keyword_id": str(rec.get("keywordId") or "") or None,
+    "keyword_text": rec.get("keywordText") or None,
+    "match_type": rec.get("matchType") or "",
+    "impressions": int(rec.get("impressions") or 0),
+    "clicks": int(rec.get("clicks") or 0),
+    "cost": float(rec.get("cost") or 0.0),
+    "attributed_sales_14d": float(rec.get("sales14d") or 0.0),
+    "attributed_conversions_14d": int(rec.get("purchases14d") or 0),
+    "run_id": run_id,
+}
+# derived
+d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
+d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
+d["acos"] = round(d["cost"] / d["attributed_sales_14d"], 6) if d["attributed_sales_14d"] else 0.0
+d["roas"] = round(d["attributed_sales_14d"] / d["cost"], 6) if d["cost"] else 0.0
 
             res = conn.execute(upsert_sql, d).first()
             if res and res[0] is True:
