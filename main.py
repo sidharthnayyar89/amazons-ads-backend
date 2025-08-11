@@ -4,6 +4,7 @@ from typing import List
 from fastapi import FastAPI, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi import BackgroundTasks
 from pydantic import BaseModel
 import uuid
 import os
@@ -1889,27 +1890,27 @@ def sp_search_terms_start(lookback_days: int = 2):
     def _ymd(d: date) -> str:
         return d.strftime("%Y-%m-%d")
 
-    # 3) correct configuration for SP Search Terms (no groupBy)
+    # 3) correct configuration for SP Search Terms
     create_body = {
-    "name": f"spSearchTerm_{_ymd(start_date)}_{_ymd(end_date)}",
-    "startDate": _ymd(start_date),
-    "endDate": _ymd(end_date),
-    "configuration": {
-        "adProduct": "SPONSORED_PRODUCTS",
-        "reportTypeId": "spSearchTerm",
-        "timeUnit": "DAILY",
-        "groupBy": ["searchTerm"],  # <-- required by Amazon
-        "columns": [
-            "date",
-            "campaignId","campaignName",
-            "adGroupId","adGroupName",
-            "searchTerm","matchType",
-            "impressions","clicks","cost",
-            "sales14d","purchases14d"  # <-- v3 names
-        ],
-        "format": "GZIP_JSON"
+        "name": f"spSearchTerm_{_ymd(start_date)}_{_ymd(end_date)}",
+        "startDate": _ymd(start_date),
+        "endDate": _ymd(end_date),
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "reportTypeId": "spSearchTerm",
+            "timeUnit": "DAILY",
+            "groupBy": ["searchTerm"],
+            "columns": [
+                "date",
+                "campaignId", "campaignName",
+                "adGroupId", "adGroupName",
+                "searchTerm", "matchType",
+                "impressions", "clicks", "cost",
+                "sales14d", "purchases14d"
+            ],
+            "format": "GZIP_JSON"
+        }
     }
-}
 
     # 4) create report; handle duplicate (HTTP 425) gracefully
     with httpx.Client(timeout=60) as client:
@@ -1925,7 +1926,6 @@ def sp_search_terms_start(lookback_days: int = 2):
         except Exception:
             pass
 
-    # bubble up any other error from Amazon Ads
     raise HTTPException(status_code=cr.status_code, detail=cr.text)
 
 @app.post("/api/sp/st_run")
