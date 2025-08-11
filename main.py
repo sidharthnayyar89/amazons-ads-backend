@@ -2081,3 +2081,153 @@ def sp_search_terms_range(start: str, end: str, limit: int = 1000):
         rows = conn.execute(q, {"pid": pid, "start_d": start_d, "end_d": end_d, "lim": limit}).mappings().all()
     return [dict(r) for r in rows]
 
+# ---- SP SEARCH TERMS: fetch & upsert (sync) ----
+from fastapi import Query
+import io, gzip, json as _json, uuid as _uuid, urllib.request
+from sqlalchemy import text as _text
+
+@app.post("/api/sp/st_fetch")
+def sp_search_terms_fetch(
+    report_id: str = Query(..., description="Amazon Reports v3 reportId"),
+    limit: int = Query(50000, ge=1, le=200000)
+):
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    # 1) get meta (auth required)
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    status_url = f"{ads_base}/reporting/reports/{report_id}"
+    with httpx.Client(timeout=120) as client:
+        r = client.get(status_url, headers=headers)
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail={"stage":"check_report","status":e.response.status_code,"body":e.response.text})
+        meta = r.json()
+        st = meta.get("status")
+        url = meta.get("url")
+        if st not in ("SUCCESS", "COMPLETED") or not url:
+            # not ready yet
+            return JSONResponse(status_code=409, content={"stage":"check_report","status":st,"meta":meta})
+
+    # 2) download presigned S3 URL with ZERO headers
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            raw_bytes = resp.read()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"stage":"download","status":400,"body":f"urllib error: {e!r}"})
+
+    # 3) gunzip (or fallback)
+    try:
+        buf = io.BytesIO(raw_bytes)
+        with gzip.GzipFile(fileobj=buf) as gz:
+            raw_text = gz.read().decode("utf-8")
+    except OSError:
+        raw_text = raw_bytes.decode("utf-8", errors="ignore")
+
+    # 4) iterate records (NDJSON or JSON array)
+    def iter_records(text: str):
+        any_yield = False
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            any_yield = True
+            yield _json.loads(line)
+        if not any_yield:
+            try:
+                arr = _json.loads(text)
+                if isinstance(arr, list):
+                    for obj in arr:
+                        yield obj
+            except Exception:
+                pass
+
+    # 5) upsert
+    pid = _env("AMZN_PROFILE_ID")
+    run_id = str(_uuid.uuid4())
+    inserted = updated = processed = 0
+
+    upsert_sql = _text("""
+        INSERT INTO fact_sp_search_term_daily (
+            profile_id, date,
+            campaign_id, campaign_name,
+            ad_group_id, ad_group_name,
+            search_term, match_type,
+            impressions, clicks, cost, sales14d, purchases14d,
+            cpc, ctr, acos, roas,
+            run_id, pulled_at
+        )
+        VALUES (
+            :profile_id, :date,
+            :campaign_id, :campaign_name,
+            :ad_group_id, :ad_group_name,
+            :search_term, :match_type,
+            :impressions, :clicks, :cost, :sales14d, :purchases14d,
+            :cpc, :ctr, :acos, :roas,
+            :run_id, now()
+        )
+        ON CONFLICT (profile_id, date, search_term, ad_group_id) DO UPDATE SET
+            campaign_id = EXCLUDED.campaign_id,
+            campaign_name = EXCLUDED.campaign_name,
+            ad_group_id = EXCLUDED.ad_group_id,
+            ad_group_name = EXCLUDED.ad_group_name,
+            match_type = EXCLUDED.match_type,
+            impressions = EXCLUDED.impressions,
+            clicks = EXCLUDED.clicks,
+            cost = EXCLUDED.cost,
+            sales14d = EXCLUDED.sales14d,
+            purchases14d = EXCLUDED.purchases14d,
+            cpc = EXCLUDED.cpc,
+            ctr = EXCLUDED.ctr,
+            acos = EXCLUDED.acos,
+            roas = EXCLUDED.roas,
+            run_id = EXCLUDED.run_id,
+            pulled_at = now()
+        RETURNING xmax = 0 AS inserted_flag
+    """)
+
+    with engine.begin() as conn:
+        for rec in iter_records(raw_text):
+            # map fields from report
+            d = {
+                "profile_id": pid,
+                "date": (rec.get("date") or "")[:10],
+                "campaign_id": str(rec.get("campaignId") or ""),
+                "campaign_name": rec.get("campaignName") or "",
+                "ad_group_id": str(rec.get("adGroupId") or ""),
+                "ad_group_name": rec.get("adGroupName") or "",
+                "search_term": rec.get("searchTerm") or "",
+                "match_type": rec.get("matchType") or "",
+                "impressions": int(rec.get("impressions") or 0),
+                "clicks": int(rec.get("clicks") or 0),
+                "cost": float(rec.get("cost") or 0.0),
+                "sales14d": float(rec.get("sales14d") or 0.0),
+                "purchases14d": int(rec.get("purchases14d") or 0),
+                "run_id": run_id,
+            }
+            if not d["date"]:
+                continue
+            # derived
+            d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
+            d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
+            d["acos"] = round(d["cost"] / d["sales14d"], 6) if d["sales14d"] else 0.0
+            d["roas"] = round(d["sales14d"] / d["cost"], 6) if d["cost"] else 0.0
+
+            res = conn.execute(upsert_sql, d).first()
+            if res and res[0] is True:
+                inserted += 1
+            else:
+                updated += 1
+
+            processed += 1
+            if processed >= limit:
+                break
+
+    return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
+
+
