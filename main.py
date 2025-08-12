@@ -118,19 +118,6 @@ def ui_keywords(request: Request):
 
 from fastapi.responses import JSONResponse
 
-@app.get("/api/debug/tables")
-def debug_tables():
-    if not engine:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT table_schema AS schema, table_name AS table
-            FROM information_schema.tables
-            WHERE table_schema='public'
-            ORDER BY 1,2
-        """)).mappings().all()
-    return JSONResponse(content=[dict(r) for r in rows])
-
 @app.get("/api/debug/st_counts_safe")
 def st_counts_safe():
     if not engine:
@@ -699,243 +686,11 @@ def sp_report_status(report_id: str):
             raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
         return r.json()
 
-@app.get("/api/sp/keywords_fetch", response_model=List[KeywordRow])
-def sp_keywords_fetch(report_id: str, limit: int = 500):
-    import io, gzip, datetime as dt, json as _json
-
-    access = _get_access_token_from_refresh()
-    headers = _ads_headers(access)
-    region = os.environ.get("AMZN_REGION", "NA").upper()
-    ads_base = _ads_base(region)
-
-    # 1) get download URL
-    status_url = f"{ads_base}/reporting/reports/{report_id}"
-    with httpx.Client(timeout=60) as client:
-        sr = client.get(status_url, headers=headers)
-        try:
-            sr.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            return JSONResponse(status_code=e.response.status_code, content={"stage":"check_report","body":e.response.text})
-        s = sr.json()
-        if s.get("status") != "SUCCESS" or not s.get("url"):
-            return JSONResponse(status_code=202, content=s)
-        download_url = s["url"]
-
-    # 2) download the gzip file — IMPORTANT: no Authorization header for S3 presigned URLs
-        # Use a FRESH client with empty default headers, and also pass empty headers on the call.
-        with httpx.Client(timeout=120, headers={}, trust_env=False) as dl:
-            dr = dl.get(download_url, headers={})  # absolutely no auth headers
-
-        try:
-            dr.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=502,
-                detail={"stage": "download", "status": e.response.status_code, "body": e.response.text},
-            )
-
-        buf = io.BytesIO(dr.content)
-        try:
-            with gzip.GzipFile(fileobj=buf) as gz:
-                raw = gz.read().decode("utf-8")
-        except OSError:
-            # some edge cases: file might not be gzipped (rare), try plain decode
-            raw = dr.content.decode("utf-8", errors="ignore")
-
-    # 3) parse + build API rows and DB rows
-    rows_out: List[KeywordRow] = []
-    to_insert = []
-    run_id = str(uuid.uuid4())
-    pulled_at = dt.date.today()
-    profile_id = _env("AMZN_PROFILE_ID")
-
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        rec = _json.loads(line)
-
-        date_str = rec.get("date")
-        if not date_str:
-            continue
-        the_date = dt.date.fromisoformat(date_str)
-
-        campaign_id = str(rec.get("campaignId",""))
-        campaign_name = rec.get("campaignName","") or ""
-        ad_group_id = str(rec.get("adGroupId",""))
-        ad_group_name = rec.get("adGroupName","") or ""
-        keyword_id = str(rec.get("keywordId",""))
-        keyword_text = rec.get("keywordText","") or ""
-        match_type = rec.get("matchType","") or ""
-
-        impressions = int(rec.get("impressions", 0) or 0)
-        clicks = int(rec.get("clicks", 0) or 0)
-        cost = float(rec.get("cost", 0.0) or 0.0)
-        sales = float(rec.get("attributedSales14d", 0.0) or 0.0)
-        orders = int(rec.get("attributedConversions14d", 0) or 0)
-
-        cpc = round(cost / clicks, 4) if clicks else 0.0
-        ctr = round(clicks / impressions, 6) if impressions else 0.0
-        acos = round(cost / sales, 6) if sales else 0.0
-        roas = round(sales / cost, 6) if cost else 0.0
-
-        rows_out.append(KeywordRow(
-            run_id=run_id,
-            pulled_at=pulled_at,
-            marketplace="",
-            campaign_id=campaign_id,
-            campaign_name=campaign_name,
-            ad_group_id=ad_group_id,
-            ad_group_name=ad_group_name,
-            entity_type="keyword",
-            keyword_id=keyword_id,
-            keyword_text=keyword_text,
-            match_type=match_type,
-            bid=0.0,
-            lookback_days=0,
-            buffer_days=0,
-            metrics=Metrics(
-                impressions=impressions,
-                clicks=clicks,
-                spend=round(cost,4),
-                sales=round(sales,4),
-                orders=orders,
-                cpc=cpc,
-                ctr=ctr,
-                acos=acos,
-                roas=roas,
-            ),
-        ))
-
-        to_insert.append({
-            "profile_id": profile_id,
-            "date": the_date,
-            "keyword_id": keyword_id,
-            "campaign_id": campaign_id,
-            "campaign_name": campaign_name,
-            "ad_group_id": ad_group_id,
-            "ad_group_name": ad_group_name,
-            "keyword_text": keyword_text,
-            "match_type": match_type,
-            "impressions": impressions,
-            "clicks": clicks,
-            "cost": cost,
-            "sales": sales,
-            "orders": orders,
-            "cpc": cpc,
-            "ctr": ctr,
-            "acos": acos,
-            "roas": roas,
-            "run_id": run_id,
-            "pulled_at": pulled_at,
-        })
-
-        if len(to_insert) >= limit:
-            break
-
-    # 4) UPSERT to Postgres
-    if engine and to_insert:
-        sql = """
-        INSERT INTO fact_sp_keyword_daily (
-          profile_id, date, keyword_id,
-          campaign_id, campaign_name, ad_group_id, ad_group_name,
-          keyword_text, match_type,
-          impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
-          cpc, ctr, acos, roas,
-          run_id, pulled_at
-        )
-        VALUES (
-          :profile_id, :date, :keyword_id,
-          :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
-          :keyword_text, :match_type,
-          :impressions, :clicks, :cost, :sales, :orders,
-          :cpc, :ctr, :acos, :roas,
-          :run_id, :pulled_at
-        )
-        ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
-          campaign_id = EXCLUDED.campaign_id,
-          campaign_name = EXCLUDED.campaign_name,
-          ad_group_id = EXCLUDED.ad_group_id,
-          ad_group_name = EXCLUDED.ad_group_name,
-          keyword_text = EXCLUDED.keyword_text,
-          match_type = EXCLUDED.match_type,
-          impressions = EXCLUDED.impressions,
-          clicks = EXCLUDED.clicks,
-          cost = EXCLUDED.cost,
-          attributed_sales_14d = EXCLUDED.attributed_sales_14d,
-          attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
-          cpc = EXCLUDED.cpc,
-          ctr = EXCLUDED.ctr,
-          acos = EXCLUDED.acos,
-          roas = EXCLUDED.roas,
-          run_id = EXCLUDED.run_id,
-          pulled_at = EXCLUDED.pulled_at
-        """
-        with engine.begin() as conn:
-            conn.execute(text(sql), to_insert)
-
-    return rows_out
-
 # ================================
 # SP SEARCH TERMS (Reports v3)
 # ================================
 from fastapi import Query
 import io, gzip, json as _json, uuid as _uuid, urllib.request
-
-@app.post("/api/sp/searchterms_start")
-def sp_searchterms_start(lookback_days: int = 2):
-    """
-    Create a Sponsored Products Search Terms DAILY report for the last `lookback_days`
-    (ending yesterday). Returns a report_id immediately.
-    """
-    from datetime import date, timedelta
-    import re
-
-    end_date = date.today() - timedelta(days=1)
-    start_date = end_date - timedelta(days=max(1, lookback_days) - 1)
-
-    access = _get_access_token_from_refresh()
-    headers = _ads_headers(access)
-    region = os.environ.get("AMZN_REGION", "NA").upper()
-    ads_base = _ads_base(region)
-
-    def _ymd(d: date) -> str:
-        return d.strftime("%Y-%m-%d")
-
-    create_body = {
-        "name": f"spSearchTerms_{_ymd(start_date)}_{_ymd(end_date)}",
-        "startDate": _ymd(start_date),
-        "endDate": _ymd(end_date),
-        "configuration": {
-            "adProduct": "SPONSORED_PRODUCTS",
-            "reportTypeId": "spSearchTerms",
-            "timeUnit": "DAILY",
-            "groupBy": ["adGroup"],  # allowed for this report
-            "columns": [
-                "date",
-                "campaignId","campaignName",
-                "adGroupId","adGroupName",
-                "keywordId","keywordText",
-                "searchTerm","matchType",
-                "impressions","clicks","cost",
-                "attributedSales14d","attributedConversions14d"
-            ],
-            "format": "GZIP_JSON"
-        }
-    }
-
-    with httpx.Client(timeout=60) as client:
-        cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
-
-    if 200 <= cr.status_code < 300:
-        return {"report_id": cr.json().get("reportId")}
-    elif cr.status_code == 425:
-        import re
-        try:
-            rid = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail","")).group(1)
-            return {"report_id": rid, "duplicate": True}
-        except Exception:
-            pass
-    raise HTTPException(status_code=cr.status_code, detail=cr.text)
 
 @app.post("/api/sp/keywords_run")
 def sp_keywords_run(lookback_days: int = 2, background_tasks: BackgroundTasks = None):
@@ -1106,38 +861,6 @@ def sp_counts():
         })
     return out
 
-@app.get("/api/debug/st_counts_safe")
-def st_counts_safe():
-    if not engine:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    pid = _env("AMZN_PROFILE_ID")
-    q = text("""
-        SELECT date,
-               COUNT(*) AS rows,
-               SUM(clicks) AS clicks,
-               SUM(cost) AS cost,
-               SUM(attributed_sales_14d) AS sales_14d,
-               SUM(attributed_conversions_14d) AS orders_14d
-        FROM fact_sp_search_term_daily
-        WHERE profile_id = :pid
-        GROUP BY date
-        ORDER BY date DESC
-        LIMIT 10
-    """)
-    with engine.begin() as conn:
-        rows = conn.execute(q, {"pid": pid}).mappings().all()
-    out = []
-    for r in rows:
-        out.append({
-            "date": r["date"].isoformat(),
-            "rows": int(r["rows"]),
-            "clicks": int(r["clicks"] or 0),
-            "cost": float(r["cost"] or 0),
-            "sales_14d": float(r["sales_14d"] or 0),
-            "orders_14d": int(r["orders_14d"] or 0),
-        })
-    return out
-
 @app.post("/api/debug/create_st_table")
 def create_st_table():
     """
@@ -1201,32 +924,6 @@ def list_tables():
 # --- DEBUG: safer st_counts (returns error details instead of 500)
 
 from fastapi.responses import JSONResponse
-
-@app.get("/api/debug/st_counts_safe")
-def st_counts_safe():
-    if not engine:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    pid = _env("AMZN_PROFILE_ID")
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT date,
-                   COUNT(*) AS rows,
-                   COALESCE(SUM(clicks),0) AS clicks,
-                   COALESCE(SUM(cost),0)   AS cost
-            FROM fact_sp_search_term_daily
-            WHERE profile_id = :pid
-            GROUP BY date
-            ORDER BY date DESC
-            LIMIT 10
-        """), {"pid": pid}).mappings().all()
-
-    out = [{
-        "date": r["date"].isoformat(),
-        "rows": int(r["rows"]),
-        "clicks": int(r["clicks"]),
-        "cost": float(r["cost"]),
-    } for r in rows]
-    return JSONResponse(content=out)
 
 @app.get("/api/debug/st_head")
 def st_head(limit: int = 20):
@@ -1916,3 +1613,7 @@ with engine.begin() as conn:
             break
 
 return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
+
+@app.on_event("startup")
+def _startup():
+    init_db()
