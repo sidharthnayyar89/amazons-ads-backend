@@ -1498,7 +1498,7 @@ def sp_search_terms_fetch(
             raw_text = gz.read().decode("utf-8")
     except OSError:
         raw_text = raw_bytes.decode("utf-8", errors="ignore")
-
+        
     # 4) iterate records (NDJSON or JSON array)
     def iter_records(text: str):
         any_yield = False
@@ -1516,8 +1516,8 @@ def sp_search_terms_fetch(
                         yield obj
             except Exception:
                 pass
-
-     # 5) upsert
+                
+    # 5) upsert
     pid = _env("AMZN_PROFILE_ID")
     run_id = str(_uuid.uuid4())
     inserted = updated = processed = 0
@@ -1563,7 +1563,7 @@ def sp_search_terms_fetch(
     RETURNING xmax = 0 AS inserted_flag
 """)
 
-with engine.begin() as conn:
+    with engine.begin() as conn:
     for rec in iter_records(raw_text):
         # map fields from report
         d = {
