@@ -1422,16 +1422,6 @@ def _process_st_report_in_bg(report_id: str):
         print("[st_bg_error]", e)
         traceback.print_exc()
 
-@app.post("/api/sp/st_fetch")
-def sp_search_terms_fetch(report_id: str = Query(...), limit: int = Query(10000, ge=1, le=200000)):
-    """
-    Synchronous fetch & upsert for a COMPLETED search term report (like keywords_fetch).
-    """
-    # Reuse the same pattern you used for keywords_fetch: check status, download with no headers,
-    # gunzip, loop lines, and upsert into fact_sp_search_term_daily.
-    # To keep this short here: if you want, I’ll paste a carbon-copy adjusted to searchTerm.
-    return {"ok": True, "note": "Use st_run for background ingestion."}
-
 @app.get("/api/sp/st_range")
 def sp_search_terms_range(start: str, end: str, limit: int = 1000):
     if not engine:
@@ -1527,12 +1517,12 @@ def sp_search_terms_fetch(
             except Exception:
                 pass
 
-  # 5) upsert
-pid = _env("AMZN_PROFILE_ID")
-run_id = str(_uuid.uuid4())
-inserted = updated = processed = 0
+     # 5) upsert
+    pid = _env("AMZN_PROFILE_ID")
+    run_id = str(_uuid.uuid4())
+    inserted = updated = processed = 0
 
-upsert_sql = _text("""
+    upsert_sql = _text("""
     INSERT INTO fact_sp_search_term_daily (
         profile_id, date,
         campaign_id, campaign_name,
