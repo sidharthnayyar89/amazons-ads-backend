@@ -1602,7 +1602,7 @@ def sp_search_terms_fetch(
         if processed >= limit:
             break
 
-return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
+    return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
 
 @app.on_event("startup")
 def _startup():
