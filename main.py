@@ -1564,24 +1564,30 @@ def sp_search_terms_fetch(
     """)
 
     with engine.begin() as conn:
-        for rec in iter_records(raw_text):
+    for rec in iter_records(raw_text):
+        # normalize: handle list-of-records as well as a single dict
+        items = rec if isinstance(rec, list) else [rec]
+        for obj in items:
+            if not isinstance(obj, dict):
+                continue
+
             d = {
                 "profile_id": pid,
-                "date": (rec.get("date") or "")[:10],
-                "campaign_id": str(rec.get("campaignId") or ""),
-                "campaign_name": rec.get("campaignName") or "",
-                "ad_group_id": str(rec.get("adGroupId") or ""),
-                "ad_group_name": rec.get("adGroupName") or "",
-                "search_term": rec.get("searchTerm") or "",
-                "keyword_id": (str(rec.get("keywordId") or "") or None),
-                "keyword_text": rec.get("keywordText") or None,
-                "match_type": rec.get("matchType") or "",
-                "impressions": int(rec.get("impressions") or 0),
-                "clicks": int(rec.get("clicks") or 0),
-                "cost": float(rec.get("cost") or 0.0),
-                # if your report uses attributedSales14d/purchases14d change the two lines below
-                "attributed_sales_14d": float(rec.get("sales14d") or 0.0),
-                "attributed_conversions_14d": int(rec.get("purchases14d") or 0),
+                "date": (obj.get("date") or "")[:10],
+                "campaign_id": str(obj.get("campaignId") or ""),
+                "campaign_name": obj.get("campaignName") or "",
+                "ad_group_id": str(obj.get("adGroupId") or ""),
+                "ad_group_name": obj.get("adGroupName") or "",
+                "search_term": obj.get("searchTerm") or "",
+                "keyword_id": (str(obj.get("keywordId") or "") or None),
+                "keyword_text": obj.get("keywordText") or None,
+                "match_type": obj.get("matchType") or "",
+                "impressions": int(obj.get("impressions") or 0),
+                "clicks": int(obj.get("clicks") or 0),
+                "cost": float(obj.get("cost") or 0.0),
+                # If your report uses attributed* names instead, swap the two lines below.
+                "attributed_sales_14d": float(obj.get("sales14d") or 0.0),
+                "attributed_conversions_14d": int(obj.get("purchases14d") or 0),
                 "run_id": run_id,
             }
             d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
