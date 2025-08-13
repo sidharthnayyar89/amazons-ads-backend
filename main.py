@@ -1517,7 +1517,7 @@ def sp_search_terms_fetch(
             except Exception:
                 pass
 
-    # 5) upsert   <-- from here down, everything was missing one indent level
+	# 5) upsert   <-- from here down, everything was missing one indent level
     pid = _env("AMZN_PROFILE_ID")
     run_id = str(_uuid.uuid4())
     inserted = updated = processed = 0
@@ -1563,7 +1563,7 @@ def sp_search_terms_fetch(
     RETURNING xmax = 0 AS inserted_flag
     """)
 
-    with engine.begin() as conn:
+	with engine.begin() as conn:
     for rec in iter_records(raw_text):
         # normalize: handle list-of-records as well as a single dict
         items = rec if isinstance(rec, list) else [rec]
