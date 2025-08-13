@@ -1604,7 +1604,7 @@ def sp_search_terms_fetch(
             processed += 1
             if processed >= limit:
                 break
-
+    
     return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
 
 @app.on_event("startup")
