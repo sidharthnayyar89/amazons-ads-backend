@@ -1497,7 +1497,7 @@ def sp_search_terms_fetch(
             raw_text = gz.read().decode("utf-8")
     except OSError:
         raw_text = raw_bytes.decode("utf-8", errors="ignore")
-        
+
     # 4) iterate records (NDJSON or JSON array)
     def iter_records(text: str):
         any_yield = False
@@ -1515,8 +1515,8 @@ def sp_search_terms_fetch(
                         yield obj
             except Exception:
                 pass
-                
-       # 5) upsert
+
+    # 5) upsert   <-- from here down, everything was missing one indent level
     pid = _env("AMZN_PROFILE_ID")
     run_id = str(_uuid.uuid4())
     inserted = updated = processed = 0
@@ -1578,7 +1578,7 @@ def sp_search_terms_fetch(
                 "impressions": int(rec.get("impressions") or 0),
                 "clicks": int(rec.get("clicks") or 0),
                 "cost": float(rec.get("cost") or 0.0),
-                # adjust these two if your file uses attributedSales14d/purchases14d
+                # if your report uses attributedSales14d/purchases14d change the two lines below
                 "attributed_sales_14d": float(rec.get("sales14d") or 0.0),
                 "attributed_conversions_14d": int(rec.get("purchases14d") or 0),
                 "run_id": run_id,
