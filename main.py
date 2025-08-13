@@ -4,7 +4,6 @@ from typing import List
 from fastapi import FastAPI, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from fastapi import BackgroundTasks
 from pydantic import BaseModel
 import uuid
 import os
