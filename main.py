@@ -5,6 +5,7 @@ from fastapi import FastAPI, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from fastapi import BackgroundTasks
 import uuid
 import os
 import urllib.parse
