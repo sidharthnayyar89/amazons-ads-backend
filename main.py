@@ -1553,7 +1553,7 @@ def sp_search_terms_fetch(
         :cpc, :ctr, :acos, :roas,
         :run_id, now()
     )
-    ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
+    ON CONFLICT (profile_id, date, campaign_id,  ad_group_id, search_term, match_type) DO UPDATE SET
         campaign_id = EXCLUDED.campaign_id,
         campaign_name = EXCLUDED.campaign_name,
         ad_group_id = EXCLUDED.ad_group_id,
@@ -1619,3 +1619,30 @@ def sp_search_terms_fetch(
 @app.on_event("startup")
 def _startup():
     init_db()
+
+@app.post("/api/debug/migrate_st_add_keyword_cols")
+def migrate_st_add_keyword_cols():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    sql = """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='fact_sp_search_term_daily' AND column_name='keyword_id'
+      ) THEN
+        ALTER TABLE fact_sp_search_term_daily ADD COLUMN keyword_id text;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='fact_sp_search_term_daily' AND column_name='keyword_text'
+      ) THEN
+        ALTER TABLE fact_sp_search_term_daily ADD COLUMN keyword_text text;
+      END IF;
+    END$$;
+    """
+    with engine.begin() as conn:
+        conn.exec_driver_sql(sql)
+    return {"ok": True, "changed": ["keyword_id", "keyword_text"]}
+
