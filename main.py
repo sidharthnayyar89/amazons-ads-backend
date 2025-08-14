@@ -1536,7 +1536,44 @@ def sp_search_terms_fetch(
     run_id = str(_uuid.uuid4())
     inserted = updated = processed = 0
 
-    upsert_sql = _text(""" ... your INSERT ... """)
+    upsert_sql = _text("""
+    INSERT INTO fact_sp_search_term_daily (
+        profile_id, date,
+        campaign_id, campaign_name, ad_group_id, ad_group_name,
+        search_term, keyword_id, keyword_text, match_type,
+        impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+        cpc, ctr, acos, roas,
+        run_id, pulled_at
+    )
+    VALUES (
+        :profile_id, :date,
+        :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+        :search_term, :keyword_id, :keyword_text, :match_type,
+        :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
+        :cpc, :ctr, :acos, :roas,
+        :run_id, now()
+    )
+    ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
+        campaign_id = EXCLUDED.campaign_id,
+        campaign_name = EXCLUDED.campaign_name,
+        ad_group_id = EXCLUDED.ad_group_id,
+        ad_group_name = EXCLUDED.ad_group_name,
+        keyword_id = EXCLUDED.keyword_id,
+        keyword_text = EXCLUDED.keyword_text,
+        match_type = EXCLUDED.match_type,
+        impressions = EXCLUDED.impressions,
+        clicks = EXCLUDED.clicks,
+        cost = EXCLUDED.cost,
+        attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+        attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+        cpc = EXCLUDED.cpc,
+        ctr = EXCLUDED.ctr,
+        acos = EXCLUDED.acos,
+        roas = EXCLUDED.roas,
+        run_id = EXCLUDED.run_id,
+        pulled_at = now()
+    RETURNING xmax = 0 AS inserted_flag
+""")
 
     with engine.begin() as conn:  # ← inside function now
         for rec in iter_records(raw_text):
