@@ -1419,11 +1419,12 @@ def _process_st_report_in_bg(report_id: str):
         import traceback
         print("[st_bg_error]", e)
         traceback.print_exc()
-
+        
 @app.get("/api/sp/st_range")
 def sp_search_terms_range(start: str, end: str, limit: int = 1000):
     if not engine:
         raise HTTPException(status_code=500, detail="Database not configured")
+
     pid = _env("AMZN_PROFILE_ID")
 
     from datetime import date as _date
@@ -1445,9 +1446,13 @@ def sp_search_terms_range(start: str, end: str, limit: int = 1000):
         ORDER BY date DESC, campaign_name, ad_group_name, search_term
         LIMIT :lim
     """)
-with engine.begin() as conn:
-    rows = conn.execute(q, {"pid": pid, "start_d": start_d, "end_d": end_d, "lim": limit}).mappings().all()
-    return [dict(r) for r in rows]
+
+    with engine.begin() as conn:  # ← inside function now
+        rows = conn.execute(
+            q, {"pid": pid, "start_d": start_d, "end_d": end_d, "lim": limit}
+        ).mappings().all()
+
+    return [dict(r) for r in rows]  # ← inside function now
 
 # ---- SP SEARCH TERMS: fetch & upsert (sync) ----
 from fastapi import Query
@@ -1462,7 +1467,7 @@ def sp_search_terms_fetch(
     if not engine:
         raise HTTPException(status_code=500, detail="Database not configured")
 
-    # 1) get meta (auth required)
+    # 1) get meta
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
     region = os.environ.get("AMZN_REGION", "NA").upper()
@@ -1474,22 +1479,32 @@ def sp_search_terms_fetch(
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail={"stage":"check_report","status":e.response.status_code,"body":e.response.text})
+            raise HTTPException(status_code=502, detail={
+                "stage": "check_report",
+                "status": e.response.status_code,
+                "body": e.response.text
+            })
         meta = r.json()
         st = meta.get("status")
         url = meta.get("url")
         if st not in ("SUCCESS", "COMPLETED") or not url:
-            # not ready yet
-            return JSONResponse(status_code=409, content={"stage":"check_report","status":st,"meta":meta})
+            return JSONResponse(
+                status_code=409,
+                content={"stage": "check_report", "status": st, "meta": meta}
+            )
 
-    # 2) download presigned S3 URL with ZERO headers
+    # 2) download file
     try:
         with urllib.request.urlopen(url, timeout=120) as resp:
             raw_bytes = resp.read()
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"stage":"download","status":400,"body":f"urllib error: {e!r}"})
+        raise HTTPException(status_code=502, detail={
+            "stage": "download",
+            "status": 400,
+            "body": f"urllib error: {e!r}"
+        })
 
-    # 3) gunzip (or fallback)
+    # 3) gunzip fallback
     try:
         buf = io.BytesIO(raw_bytes)
         with gzip.GzipFile(fileobj=buf) as gz:
@@ -1497,7 +1512,7 @@ def sp_search_terms_fetch(
     except OSError:
         raw_text = raw_bytes.decode("utf-8", errors="ignore")
 
-    # 4) iterate records (NDJSON or JSON array)
+    # 4) iterator
     def iter_records(text: str):
         any_yield = False
         for line in text.splitlines():
@@ -1515,91 +1530,52 @@ def sp_search_terms_fetch(
             except Exception:
                 pass
 
-    # 5) upsert   <-- from here down, everything was missing one indent level
+    # 5) upsert
     pid = _env("AMZN_PROFILE_ID")
     run_id = str(_uuid.uuid4())
     inserted = updated = processed = 0
 
-    upsert_sql = _text("""
-    INSERT INTO fact_sp_search_term_daily (
-        profile_id, date,
-        campaign_id, campaign_name,
-        ad_group_id, ad_group_name,
-        search_term, keyword_id, keyword_text, match_type,
-        impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
-        cpc, ctr, acos, roas,
-        run_id, pulled_at
-    )
-    VALUES (
-        :profile_id, :date,
-        :campaign_id, :campaign_name,
-        :ad_group_id, :ad_group_name,
-        :search_term, :keyword_id, :keyword_text, :match_type,
-        :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
-        :cpc, :ctr, :acos, :roas,
-        :run_id, now()
-    )
-    ON CONFLICT (profile_id, date, search_term, ad_group_id, match_type) DO UPDATE SET
-        campaign_id = EXCLUDED.campaign_id,
-        campaign_name = EXCLUDED.campaign_name,
-        ad_group_id = EXCLUDED.ad_group_id,
-        ad_group_name = EXCLUDED.ad_group_name,
-        keyword_id = EXCLUDED.keyword_id,
-        keyword_text = EXCLUDED.keyword_text,
-        match_type = EXCLUDED.match_type,
-        impressions = EXCLUDED.impressions,
-        clicks = EXCLUDED.clicks,
-        cost = EXCLUDED.cost,
-        attributed_sales_14d = EXCLUDED.attributed_sales_14d,
-        attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
-        cpc = EXCLUDED.cpc,
-        ctr = EXCLUDED.ctr,
-        acos = EXCLUDED.acos,
-        roas = EXCLUDED.roas,
-        run_id = EXCLUDED.run_id,
-        pulled_at = now()
-    RETURNING xmax = 0 AS inserted_flag
-    """)
+    upsert_sql = _text(""" ... your INSERT ... """)
 
-with engine.begin() as conn:
-    for rec in iter_records(raw_text):
-        items = rec if isinstance(rec, list) else [rec]
-        for obj in items:
-            if not isinstance(obj, dict):
-                continue
-            d = {
-                "profile_id": pid,
-                "date": (obj.get("date") or "")[:10],
-                "campaign_id": str(obj.get("campaignId") or ""),
-                "campaign_name": obj.get("campaignName") or "",
-                "ad_group_id": str(obj.get("adGroupId") or ""),
-                "ad_group_name": obj.get("adGroupName") or "",
-                "search_term": obj.get("searchTerm") or "",
-                "keyword_id": (str(obj.get("keywordId") or "") or None),
-                "keyword_text": obj.get("keywordText") or None,
-                "match_type": obj.get("matchType") or "",
-                "impressions": int(obj.get("impressions") or 0),
-                "clicks": int(obj.get("clicks") or 0),
-                "cost": float(obj.get("cost") or 0.0),
-                "attributed_sales_14d": float(obj.get("attributedSales14d") or 0.0),
-                "attributed_conversions_14d": int(obj.get("attributedConversions14d") or 0),
-                "run_id": run_id,
-            }
-            d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
-            d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
-            d["acos"] = round(d["cost"] / d["attributed_sales_14d"], 6) if d["attributed_sales_14d"] else 0.0
-            d["roas"] = round(d["attributed_sales_14d"] / d["cost"], 6) if d["cost"] else 0.0
+    with engine.begin() as conn:  # ← inside function now
+        for rec in iter_records(raw_text):
+            items = rec if isinstance(rec, list) else [rec]
+            for obj in items:
+                if not isinstance(obj, dict):
+                    continue
+                d = {
+                    "profile_id": pid,
+                    "date": (obj.get("date") or "")[:10],
+                    "campaign_id": str(obj.get("campaignId") or ""),
+                    "campaign_name": obj.get("campaignName") or "",
+                    "ad_group_id": str(obj.get("adGroupId") or ""),
+                    "ad_group_name": obj.get("adGroupName") or "",
+                    "search_term": obj.get("searchTerm") or "",
+                    "keyword_id": (str(obj.get("keywordId") or "") or None),
+                    "keyword_text": obj.get("keywordText") or None,
+                    "match_type": obj.get("matchType") or "",
+                    "impressions": int(obj.get("impressions") or 0),
+                    "clicks": int(obj.get("clicks") or 0),
+                    "cost": float(obj.get("cost") or 0.0),
+                    "attributed_sales_14d": float(obj.get("attributedSales14d") or 0.0),
+                    "attributed_conversions_14d": int(obj.get("attributedConversions14d") or 0),
+                    "run_id": run_id,
+                }
+                d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
+                d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
+                d["acos"] = round(d["cost"] / d["attributed_sales_14d"], 6) if d["attributed_sales_14d"] else 0.0
+                d["roas"] = round(d["attributed_sales_14d"] / d["cost"], 6) if d["cost"] else 0.0
 
-            res = conn.execute(upsert_sql, d).first()
-            if res and res[0] is True:
-                inserted += 1
-            else:
-                updated += 1
+                res = conn.execute(upsert_sql, d).first()
+                if res and res[0] is True:
+                    inserted += 1
+                else:
+                    updated += 1
 
-            processed += 1
-            if processed >= limit:
-                break
-    
+                processed += 1
+                if processed >= limit:
+                    break
+
     return {"report_id": report_id, "processed": processed, "inserted": inserted, "updated": updated}
 
 @app.on_event("startup")
