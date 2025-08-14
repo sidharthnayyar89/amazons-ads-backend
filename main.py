@@ -1537,7 +1537,7 @@ def sp_search_terms_fetch(
     RETURNING xmax = 0 AS inserted_flag
     """)
 
-    with engine.begin() as conn:
+with engine.begin() as conn:
     for rec in iter_records(raw_text):
         items = rec if isinstance(rec, list) else [rec]
         for obj in items:
