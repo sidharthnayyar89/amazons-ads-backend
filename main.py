@@ -1539,12 +1539,10 @@ def sp_search_terms_fetch(
 
     with engine.begin() as conn:
     for rec in iter_records(raw_text):
-        # normalize: handle list-of-records as well as a single dict
         items = rec if isinstance(rec, list) else [rec]
         for obj in items:
             if not isinstance(obj, dict):
                 continue
-
             d = {
                 "profile_id": pid,
                 "date": (obj.get("date") or "")[:10],
@@ -1559,9 +1557,8 @@ def sp_search_terms_fetch(
                 "impressions": int(obj.get("impressions") or 0),
                 "clicks": int(obj.get("clicks") or 0),
                 "cost": float(obj.get("cost") or 0.0),
-                # If your report uses attributed* names instead, swap the two lines below.
-                "attributed_sales_14d": float(obj.get("sales14d") or 0.0),
-                "attributed_conversions_14d": int(obj.get("purchases14d") or 0),
+                "attributed_sales_14d": float(obj.get("attributedSales14d") or 0.0),
+                "attributed_conversions_14d": int(obj.get("attributedConversions14d") or 0),
                 "run_id": run_id,
             }
             d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
