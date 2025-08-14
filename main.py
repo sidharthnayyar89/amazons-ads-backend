@@ -1224,7 +1224,8 @@ def sp_search_terms_start(lookback_days: int = 2):
                 "adGroupId", "adGroupName",
                 "searchTerm", "matchType",
                 "impressions", "clicks", "cost",
-                "attributedsales14d", "attributedconversions14d"
+                "sales14d", "purchases14d",
+                "keywordId", "keyword"
             ],
             "format": "GZIP_JSON"
         }
@@ -1335,8 +1336,8 @@ def _process_st_report_in_bg(report_id: str):
             impressions = int(rec.get("impressions") or 0)
             clicks = int(rec.get("clicks") or 0)
             cost = float(rec.get("cost") or 0.0)
-            sales = float(rec.get("attributedSales14d") or 0.0)
-            orders = int(rec.get("attributedConversions14d") or 0)
+            sales = float(rec.get("sales14d") or 0.0)
+            orders = int(rec.get("purchases14d") or 0)
 
             cpc  = round(cost / clicks, 6) if clicks else 0.0
             ctr  = round(clicks / impressions, 6) if impressions else 0.0
@@ -1557,8 +1558,8 @@ def sp_search_terms_fetch(
                     "impressions": int(obj.get("impressions") or 0),
                     "clicks": int(obj.get("clicks") or 0),
                     "cost": float(obj.get("cost") or 0.0),
-                    "attributed_sales_14d": float(obj.get("attributedSales14d") or 0.0),
-                    "attributed_conversions_14d": int(obj.get("attributedConversions14d") or 0),
+                    "attributed_sales_14d": float(obj.get("sales14d") or 0.0),
+                    "attributed_conversions_14d": int(obj.get("purchases14d") or 0),
                     "run_id": run_id,
                 }
                 d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
