@@ -1726,3 +1726,335 @@ def migrate_st_mapping_history():
         conn.exec_driver_sql(ddl)
 
     return {"ok": True, "objects": ["fact_sp_search_term_map_history", "trg_log_st_keyword_mapping_change", "trg_after_update_st_map_change"]}
+
+# ====== BACKFILL / DAILY HELPERS ======
+import datetime as _dt
+import time as _time
+
+def _ymd(d: _dt.date) -> str:
+    return d.strftime("%Y-%m-%d")
+
+def _chunk_ranges(start: _dt.date, end: _dt.date, chunk_days: int):
+    cur = start
+    delta = _dt.timedelta(days=chunk_days-1)
+    while cur <= end:
+        chunk_end = min(end, cur + delta)
+        yield cur, chunk_end
+        cur = chunk_end + _dt.timedelta(days=1)
+
+def _create_report(ads_base: str, headers: dict, body: dict) -> str:
+    with httpx.Client(timeout=60) as client:
+        r = client.post(f"{ads_base}/reporting/reports", headers=headers, json=body)
+        if 200 <= r.status_code < 300:
+            return r.json().get("reportId")
+        if r.status_code == 425:
+            # duplicate request: extract reportId from detail
+            import re
+            try:
+                return re.search(r"([0-9a-fA-F-]{36})", r.json().get("detail","")).group(1)
+            except Exception:
+                pass
+        raise HTTPException(status_code=502, detail={"stage":"create_report","status":r.status_code,"body":r.text})
+
+def _wait_and_download(ads_base: str, headers: dict, report_id: str, max_wait_seconds: int = 600) -> str:
+    status_url = f"{ads_base}/reporting/reports/{report_id}"
+    deadline = _time.time() + max_wait_seconds
+    with httpx.Client(timeout=60) as client:
+        while _time.time() < deadline:
+            s = client.get(status_url, headers=headers)
+            if s.status_code >= 400:
+                raise HTTPException(status_code=502, detail={"stage":"check_report","status":s.status_code,"body":s.text})
+            meta = s.json()
+            if meta.get("status") in ("SUCCESS","COMPLETED") and meta.get("url"):
+                # download with ZERO headers
+                dr = httpx.get(meta["url"], headers={}, timeout=120)
+                if dr.status_code >= 400:
+                    raise HTTPException(status_code=502, detail={"stage":"download","status":dr.status_code,"body":dr.text})
+                # gunzip if needed
+                try:
+                    buf = io.BytesIO(dr.content)
+                    with gzip.GzipFile(fileobj=buf) as gz:
+                        return gz.read().decode("utf-8")
+                except OSError:
+                    return dr.content.decode("utf-8", errors="ignore")
+            if meta.get("status") in {"FAILURE","CANCELLED"}:
+                raise HTTPException(status_code=502, detail={"stage":"check_report","status":meta.get("status"),"meta":meta})
+            _time.sleep(3)
+    raise HTTPException(status_code=504, detail={"stage":"check_report","status":"TIMEOUT","report_id":report_id})
+
+# ====== SEARCH TERMS BACKFILL ======
+@app.post("/api/tasks/backfill_search_terms")
+def backfill_search_terms(days: int = 65, chunk_days: int = 14, background_tasks: BackgroundTasks = None):
+    """
+    Backfill SP Search Terms for the last `days` days in chunks of `chunk_days`.
+    Returns immediately; ingestion runs in background.
+    """
+    start = _dt.date.today() - _dt.timedelta(days=max(1, days))
+    end   = _dt.date.today() - _dt.timedelta(days=1)  # up to yesterday
+    if background_tasks is not None:
+        background_tasks.add_task(_run_st_backfill, start, end, chunk_days)
+    return {"status":"QUEUED","type":"search_terms","start":_ymd(start),"end":_ymd(end),"chunk_days":chunk_days}
+
+def _run_st_backfill(start: _dt.date, end: _dt.date, chunk_days: int):
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region  = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    pid = _env("AMZN_PROFILE_ID")
+    run_id = str(uuid.uuid4())
+
+    upsert_sql = text("""
+    INSERT INTO fact_sp_search_term_daily (
+        profile_id, date,
+        campaign_id, campaign_name, ad_group_id, ad_group_name,
+        search_term, keyword_id, keyword_text, match_type,
+        impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+        cpc, ctr, acos, roas, run_id, pulled_at
+    )
+    VALUES (
+        :profile_id, :date,
+        :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+        :search_term, :keyword_id, :keyword_text, :match_type,
+        :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
+        :cpc, :ctr, :acos, :roas, :run_id, now()
+    )
+    ON CONFLICT (profile_id, date, campaign_id, ad_group_id, search_term, match_type) DO UPDATE SET
+        campaign_id = EXCLUDED.campaign_id,
+        campaign_name = EXCLUDED.campaign_name,
+        ad_group_id = EXCLUDED.ad_group_id,
+        ad_group_name = EXCLUDED.ad_group_name,
+        keyword_id = EXCLUDED.keyword_id,
+        keyword_text = EXCLUDED.keyword_text,
+        match_type = EXCLUDED.match_type,
+        impressions = EXCLUDED.impressions,
+        clicks = EXCLUDED.clicks,
+        cost = EXCLUDED.cost,
+        attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+        attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+        cpc = EXCLUDED.cpc,
+        ctr = EXCLUDED.ctr,
+        acos = EXCLUDED.acos,
+        roas = EXCLUDED.roas,
+        run_id = EXCLUDED.run_id,
+        pulled_at = now()
+    """)
+
+    def _safe_int(x): 
+        try: return int(x or 0)
+        except: return 0
+    def _safe_float(x):
+        try: return float(x or 0.0)
+        except: return 0.0
+
+    for s, e in _chunk_ranges(start, end, chunk_days):
+        body = {
+            "name": f"st_{_ymd(s)}_{_ymd(e)}",
+            "startDate": _ymd(s),
+            "endDate": _ymd(e),
+            "configuration": {
+                "adProduct": "SPONSORED_PRODUCTS",
+                "reportTypeId": "spSearchTerm",
+                "timeUnit": "DAILY",
+                "groupBy": ["searchTerm"],
+                "columns": [
+                    "date",
+                    "campaignId","campaignName",
+                    "adGroupId","adGroupName",
+                    "searchTerm","matchType",
+                    "impressions","clicks","cost",
+                    "sales14d","purchases14d",
+                    "keywordId","keyword"  # may be null for some rows
+                ],
+                "format": "GZIP_JSON"
+            }
+        }
+        rid = _create_report(ads_base, headers, body)
+        raw_text = _wait_and_download(ads_base, headers, rid, max_wait_seconds=int(os.environ.get("AMZN_REPORT_WAIT_SECONDS","600")))
+
+        rows = []
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            obj = _json.loads(line)
+            ds  = (obj.get("date") or obj.get("reportDate") or "")[:10]
+            st  = (obj.get("searchTerm") or "").strip()
+            if not ds or not st:
+                continue
+
+            impressions = _safe_int(obj.get("impressions"))
+            clicks      = _safe_int(obj.get("clicks"))
+            cost        = _safe_float(obj.get("cost"))
+            sales14d    = _safe_float(obj.get("sales14d"))
+            orders14d   = _safe_int(obj.get("purchases14d"))
+
+            cpc  = round(cost / clicks, 6) if clicks else 0.0
+            ctr  = round(clicks / impressions, 6) if impressions else 0.0
+            acos = round(cost / sales14d, 6) if sales14d else 0.0
+            roas = round(sales14d / cost, 6) if cost else 0.0
+
+            rows.append({
+                "profile_id": pid,
+                "date": ds,
+                "campaign_id": str(obj.get("campaignId") or ""),
+                "campaign_name": obj.get("campaignName") or "",
+                "ad_group_id": str(obj.get("adGroupId") or ""),
+                "ad_group_name": obj.get("adGroupName") or "",
+                "search_term": st,
+                "keyword_id": (str(obj.get("keywordId") or "") or None),
+                "keyword_text": (obj.get("keyword") or obj.get("keywordText") or None),
+                "match_type": obj.get("matchType") or "",
+                "impressions": impressions,
+                "clicks": clicks,
+                "cost": cost,
+                "attributed_sales_14d": sales14d,
+                "attributed_conversions_14d": orders14d,
+                "cpc": cpc, "ctr": ctr, "acos": acos, "roas": roas,
+                "run_id": run_id,
+            })
+
+        if rows and engine:
+            with engine.begin() as conn:
+                conn.execute(upsert_sql, rows)
+
+# ====== KEYWORDS BACKFILL ======
+@app.post("/api/tasks/backfill_keywords")
+def backfill_keywords(days: int = 65, chunk_days: int = 14, background_tasks: BackgroundTasks = None):
+    """
+    Backfill SP Keywords for the last `days` days in chunks of `chunk_days`.
+    """
+    start = _dt.date.today() - _dt.timedelta(days=max(1, days))
+    end   = _dt.date.today() - _dt.timedelta(days=1)
+    if background_tasks is not None:
+        background_tasks.add_task(_run_kw_backfill, start, end, chunk_days)
+    return {"status":"QUEUED","type":"keywords","start":_ymd(start),"end":_ymd(end),"chunk_days":chunk_days}
+
+def _run_kw_backfill(start: _dt.date, end: _dt.date, chunk_days: int):
+    access = _get_access_token_from_refresh()
+    headers = _ads_headers(access)
+    region  = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+
+    pid = _env("AMZN_PROFILE_ID")
+    run_id = str(uuid.uuid4())
+
+    upsert_sql = text("""
+        INSERT INTO fact_sp_keyword_daily (
+            profile_id, date, keyword_id,
+            campaign_id, campaign_name, ad_group_id, ad_group_name,
+            keyword_text, match_type,
+            impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+            cpc, ctr, acos, roas,
+            run_id, pulled_at
+        )
+        VALUES (
+            :profile_id, :date, :keyword_id,
+            :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+            :keyword_text, :match_type,
+            :impressions, :clicks, :cost, :sales, :orders,
+            :cpc, :ctr, :acos, :roas,
+            :run_id, now()
+        )
+        ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
+            campaign_id = EXCLUDED.campaign_id,
+            campaign_name = EXCLUDED.campaign_name,
+            ad_group_id = EXCLUDED.ad_group_id,
+            ad_group_name = EXCLUDED.ad_group_name,
+            keyword_text = EXCLUDED.keyword_text,
+            match_type = EXCLUDED.match_type,
+            impressions = EXCLUDED.impressions,
+            clicks = EXCLUDED.clicks,
+            cost = EXCLUDED.cost,
+            attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+            attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+            cpc = EXCLUDED.cpc,
+            ctr = EXCLUDED.ctr,
+            acos = EXCLUDED.acos,
+            roas = EXCLUDED.roas,
+            run_id = EXCLUDED.run_id,
+            pulled_at = now()
+    """)
+
+    def _safe_int(x): 
+        try: return int(x or 0)
+        except: return 0
+    def _safe_float(x):
+        try: return float(x or 0.0)
+        except: return 0.0
+
+    for s, e in _chunk_ranges(start, end, chunk_days):
+        body = {
+            "name": f"kw_{_ymd(s)}_{_ymd(e)}",
+            "startDate": _ymd(s),
+            "endDate": _ymd(e),
+            "configuration": {
+                "adProduct": "SPONSORED_PRODUCTS",
+                "reportTypeId": "spKeywords",
+                "timeUnit": "DAILY",
+                "groupBy": ["adGroup"],
+                "columns": [
+                    "date",
+                    "campaignId","campaignName",
+                    "adGroupId","adGroupName",
+                    "keywordId","keywordText","matchType",
+                    "impressions","clicks","cost",
+                    "attributedSales14d","attributedConversions14d"
+                ],
+                "format": "GZIP_JSON"
+            }
+        }
+        rid = _create_report(ads_base, headers, body)
+        raw_text = _wait_and_download(ads_base, headers, rid, max_wait_seconds=int(os.environ.get("AMZN_REPORT_WAIT_SECONDS","600")))
+
+        rows = []
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            ds = (obj.get("date") or obj.get("reportDate") or "")[:10]
+            if not ds:
+                continue
+
+            impressions = _safe_int(obj.get("impressions"))
+            clicks      = _safe_int(obj.get("clicks"))
+            cost        = _safe_float(obj.get("cost"))
+            sales       = _safe_float(obj.get("attributedSales14d"))
+            orders      = _safe_int(obj.get("attributedConversions14d"))
+
+            cpc  = round(cost / clicks, 6) if clicks else 0.0
+            ctr  = round(clicks / impressions, 6) if impressions else 0.0
+            acos = round(cost / sales, 6) if sales else 0.0
+            roas = round(sales / cost, 6) if cost else 0.0
+
+            rows.append({
+                "profile_id": pid,
+                "date": ds,
+                "keyword_id": str(obj.get("keywordId") or "0"),
+                "campaign_id": str(obj.get("campaignId") or ""),
+                "campaign_name": obj.get("campaignName") or "",
+                "ad_group_id": str(obj.get("adGroupId") or ""),
+                "ad_group_name": obj.get("adGroupName") or "",
+                "keyword_text": obj.get("keywordText") or "",
+                "match_type": obj.get("matchType") or "",
+                "impressions": impressions, "clicks": clicks, "cost": cost,
+                "sales": sales, "orders": orders,
+                "cpc": cpc, "ctr": ctr, "acos": acos, "roas": roas,
+                "run_id": run_id,
+            })
+
+        if rows and engine:
+            with engine.begin() as conn:
+                conn.execute(upsert_sql, rows)
+
+# ====== DAILY INGEST (yesterday) ======
+@app.post("/api/tasks/daily_ingest")
+def daily_ingest(background_tasks: BackgroundTasks):
+    """
+    Runs both Search Terms and Keywords for 'yesterday' in background.
+    """
+    y = _dt.date.today() - _dt.timedelta(days=1)
+    background_tasks.add_task(_run_st_backfill, y, y, 1)  # 1-day chunk
+    background_tasks.add_task(_run_kw_backfill, y, y, 1)
+    return {"status":"QUEUED","date":_ymd(y)}
