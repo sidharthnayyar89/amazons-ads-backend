@@ -1386,7 +1386,7 @@ def _process_st_report_in_bg(report_id: str):
                 pulled_at = now()
         """)
 
-        with engine.begin() as conn:
+    with engine.begin() as conn:
             conn.execute(upsert_sql, rows)
 
         print(f"[st_report_done] {report_id} rows={len(rows)}")
