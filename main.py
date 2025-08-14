@@ -11,6 +11,8 @@ import os
 import urllib.parse
 import json
 import httpx
+BACKFILL_WAIT_SECS = 3600
+DAILY_WAIT_SECS = 900
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine, text
 DB_URL = os.environ.get("DATABASE_URL")
@@ -1795,7 +1797,9 @@ def backfill_search_terms(days: int = 65, chunk_days: int = 14, background_tasks
         background_tasks.add_task(_run_st_backfill, start, end, chunk_days)
     return {"status":"QUEUED","type":"search_terms","start":_ymd(start),"end":_ymd(end),"chunk_days":chunk_days}
 
-def _run_st_backfill(start: _dt.date, end: _dt.date, chunk_days: int):
+def _run_st_backfill(start: _dt.date, end: _dt.date, chunk_days: int, wait_seconds: int | None = None):
+    if wait_seconds is None:
+        wait_seconds = BACKFILL_WAIT_SECS
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
     region  = os.environ.get("AMZN_REGION", "NA").upper()
@@ -1870,8 +1874,8 @@ def _run_st_backfill(start: _dt.date, end: _dt.date, chunk_days: int):
             }
         }
         rid = _create_report(ads_base, headers, body)
-        raw_text = _wait_and_download(ads_base, headers, rid, max_wait_seconds=int(os.environ.get("AMZN_REPORT_WAIT_SECONDS","600")))
-
+        raw_text = _wait_and_download(ads_base, headers, rid, max_wait_seconds=wait_seconds)
+        
         rows = []
         for line in raw_text.splitlines():
             line = line.strip()
@@ -1930,7 +1934,9 @@ def backfill_keywords(days: int = 65, chunk_days: int = 14, background_tasks: Ba
         background_tasks.add_task(_run_kw_backfill, start, end, chunk_days)
     return {"status":"QUEUED","type":"keywords","start":_ymd(start),"end":_ymd(end),"chunk_days":chunk_days}
 
-def _run_kw_backfill(start: _dt.date, end: _dt.date, chunk_days: int):
+def _run_kw_backfill(start: _dt.date, end: _dt.date, chunk_days: int, wait_seconds: int | None = None):
+    if wait_seconds is None:
+        wait_seconds = BACKFILL_WAIT_SECS
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
     region  = os.environ.get("AMZN_REGION", "NA").upper()
@@ -2005,7 +2011,7 @@ def _run_kw_backfill(start: _dt.date, end: _dt.date, chunk_days: int):
             }
         }
         rid = _create_report(ads_base, headers, body)
-        raw_text = _wait_and_download(ads_base, headers, rid, max_wait_seconds=int(os.environ.get("AMZN_REPORT_WAIT_SECONDS","600")))
+        raw_text = _wait_and_download(ads_base, headers, rid, max_wait_seconds=wait_seconds)
 
         rows = []
         for line in raw_text.splitlines():
@@ -2055,6 +2061,8 @@ def daily_ingest(background_tasks: BackgroundTasks):
     Runs both Search Terms and Keywords for 'yesterday' in background.
     """
     y = _dt.date.today() - _dt.timedelta(days=1)
-    background_tasks.add_task(_run_st_backfill, y, y, 1)  # 1-day chunk
-    background_tasks.add_task(_run_kw_backfill, y, y, 1)
-    return {"status":"QUEUED","date":_ymd(y)}
+    # 1-day chunks, with daily (shorter) wait
+    background_tasks.add_task(_run_st_backfill, y, y, 1, DAILY_WAIT_SECS)
+    background_tasks.add_task(_run_kw_backfill, y, y, 1, DAILY_WAIT_SECS)
+    return {"status":"QUEUED","date":_ymd(y), "wait_seconds": DAILY_WAIT_SECS}
+   
