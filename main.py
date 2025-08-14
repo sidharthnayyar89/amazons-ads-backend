@@ -1336,7 +1336,7 @@ def _process_st_report_in_bg(report_id: str):
             clicks = int(rec.get("clicks") or 0)
             cost = float(rec.get("cost") or 0.0)
             sales = float(rec.get("attributedSales14d") or 0.0)
-            orders = int(rec.get("attributedConv
+            orders = int(rec.get("attributedConversions14d", 0) or 0)
 
 @app.get("/api/sp/st_range")
 def sp_search_terms_range(start: str, end: str, limit: int = 1000):
