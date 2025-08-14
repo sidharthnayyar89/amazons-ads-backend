@@ -1259,47 +1259,56 @@ def sp_search_terms_run(lookback_days: int = 2, background_tasks: BackgroundTask
 
 def _process_st_report_in_bg(report_id: str):
     import io, gzip, time, datetime as dt, json as _json
+    import uuid, httpx
+    from sqlalchemy import text as _text
 
     try:
+        # --- auth / region / endpoints ---
         access = _get_access_token_from_refresh()
         headers = _ads_headers(access)
         region = os.environ.get("AMZN_REGION", "NA").upper()
         ads_base = _ads_base(region)
 
+        # --- poll for SUCCESS & get presigned URL ---
         status_url = f"{ads_base}/reporting/reports/{report_id}"
-        deadline = time.time() + int(os.environ.get("AMZN_REPORT_BG_MAX_SECONDS", "900"))
+        deadline = time.time() + int(os.environ.get("AMZN_REPORT_BG_MAX_SECONDS", "900"))  # 15m
 
         download_url = None
         with httpx.Client(timeout=60) as client:
             while time.time() < deadline:
                 sr = client.get(status_url, headers=headers)
                 if sr.status_code >= 400:
-                    print("[st_status_error]", sr.status_code, sr.text); return
+                    print("[st_status_error]", sr.status_code, sr.text)
+                    return
                 meta = sr.json()
                 st = meta.get("status")
                 if st in ("SUCCESS", "COMPLETED") and meta.get("url"):
-                    download_url = meta["url"]; break
+                    download_url = meta["url"]
+                    break
                 if st in {"FAILURE", "CANCELLED"}:
-                    print("[st_failed]", meta); return
+                    print("[st_failed]", meta)
+                    return
                 time.sleep(20)
 
-            if not download_url:
-                print("[st_timeout]", status_url); return
+        if not download_url:
+            print("[st_timeout]", status_url)
+            return
 
-            # download with ZERO headers (presigned S3)
-            dr = httpx.get(download_url, headers={}, timeout=120)
-            if dr.status_code >= 400:
-                print("[st_download_error]", dr.status_code, dr.text); return
+        # --- download with ZERO headers (presigned S3) ---
+        dr = httpx.get(download_url, headers={}, timeout=120)
+        if dr.status_code >= 400:
+            print("[st_download_error]", dr.status_code, dr.text)
+            return
 
-            # gunzip
-            try:
-                buf = io.BytesIO(dr.content)
-                with gzip.GzipFile(fileobj=buf) as gz:
-                    raw_text = gz.read().decode("utf-8")
-            except OSError:
-                raw_text = dr.content.decode("utf-8", errors="ignore")
+        # --- gunzip (or fallback to plain text) ---
+        try:
+            buf = io.BytesIO(dr.content)
+            with gzip.GzipFile(fileobj=buf) as gz:
+                raw_text = gz.read().decode("utf-8")
+        except OSError:
+            raw_text = dr.content.decode("utf-8", errors="ignore")
 
-                # parse lines
+        # --- parse lines ---
         pid = _env("AMZN_PROFILE_ID")
         run_id = str(uuid.uuid4())
         rows = []
@@ -1309,99 +1318,25 @@ def _process_st_report_in_bg(report_id: str):
             if not line:
                 continue
             rec = _json.loads(line)
+
             ds = (rec.get("date") or rec.get("reportDate") or "")[:10]
             if not ds:
                 continue
 
-            campaign_id = str(rec.get("campaignId", "") or "")
-            campaign_name = rec.get("campaignName", "") or ""
-            ad_group_id = str(rec.get("adGroupId", "") or "")
-            ad_group_name = rec.get("adGroupName", "") or ""
-            search_term = rec.get("searchTerm", "") or ""
-            keyword_id = str(rec.get("keywordId", "") or "")
-            keyword_text = rec.get("keywordText", "") or ""
-            match_type = rec.get("matchType", "") or ""
+            campaign_id = str(rec.get("campaignId") or "")
+            campaign_name = rec.get("campaignName") or ""
+            ad_group_id = str(rec.get("adGroupId") or "")
+            ad_group_name = rec.get("adGroupName") or ""
+            search_term = rec.get("searchTerm") or ""
+            keyword_id = str(rec.get("keywordId") or "")  # may be blank
+            keyword_text = rec.get("keywordText") or ""
+            match_type = rec.get("matchType") or ""
 
-            impressions = int(rec.get("impressions", 0) or 0)
-            clicks = int(rec.get("clicks", 0) or 0)
-            cost = float(rec.get("cost", 0.0) or 0.0)
-            sales = float(rec.get("attributedSales14d", 0.0) or 0.0)
-            orders = int(rec.get("attributedConversions14d", 0) or 0)
-
-            cpc  = round(cost / clicks, 6) if clicks else 0.0
-            ctr  = round(clicks / impressions, 6) if impressions else 0.0
-            acos = round(cost / sales, 6) if sales else 0.0
-            roas = round(sales / cost, 6) if cost else 0.0
-
-            rows.append({
-                "profile_id": pid, "date": ds,
-                "campaign_id": campaign_id, "campaign_name": campaign_name,
-                "ad_group_id": ad_group_id, "ad_group_name": ad_group_name,
-                "search_term": search_term,
-                "keyword_id": keyword_id or None,
-                "keyword_text": keyword_text or None,
-                "match_type": match_type,
-                "impressions": impressions, "clicks": clicks, "cost": cost,
-                "attributed_sales_14d": sales, "attributed_conversions_14d": orders,
-                "cpc": cpc, "ctr": ctr, "acos": acos, "roas": roas,
-                "run_id": run_id,
-            })
-
-        # early exits
-        if not engine:
-            print("[st_no_rows_or_db] no engine")
-            return
-        if not rows:
-            print("[st_no_rows_or_db] 0 rows")
-            return
-
-        # ✅ define UPSERT SQL inside the try:
-        upsert_sql = text("""
-            INSERT INTO fact_sp_search_term_daily (
-                profile_id, date,
-                campaign_id, campaign_name, ad_group_id, ad_group_name,
-                search_term, keyword_id, keyword_text, match_type,
-                impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
-                cpc, ctr, acos, roas, run_id, pulled_at
-            )
-            VALUES (
-                :profile_id, :date,
-                :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
-                :search_term, :keyword_id, :keyword_text, :match_type,
-                :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
-                :cpc, :ctr, :acos, :roas, :run_id, now()
-            )
-            ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
-                campaign_id = EXCLUDED.campaign_id,
-                campaign_name = EXCLUDED.campaign_name,
-                ad_group_id = EXCLUDED.ad_group_id,
-                ad_group_name = EXCLUDED.ad_group_name,
-                keyword_id = EXCLUDED.keyword_id,
-                keyword_text = EXCLUDED.keyword_text,
-                match_type = EXCLUDED.match_type,
-                impressions = EXCLUDED.impressions,
-                clicks = EXCLUDED.clicks,
-                cost = EXCLUDED.cost,
-                attributed_sales_14d = EXCLUDED.attributed_sales_14d,
-                attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
-                cpc = EXCLUDED.cpc,
-                ctr = EXCLUDED.ctr,
-                acos = EXCLUDED.acos,
-                roas = EXCLUDED.roas,
-                run_id = EXCLUDED.run_id,
-                pulled_at = now()
-        """)
-
-        # ✅ perform the upsert inside the try:
-        with engine.begin() as conn:
-            conn.execute(upsert_sql, rows)
-
-        print(f"[st_report_done] {report_id} rows={len(rows)}")
-
-    except Exception as e:
-        import traceback
-        print("[st_bg_error]", e)
-        traceback.print_exc()
+            impressions = int(rec.get("impressions") or 0)
+            clicks = int(rec.get("clicks") or 0)
+            cost = float(rec.get("cost") or 0.0)
+            sales = float(rec.get("attributedSales14d") or 0.0)
+            orders = int(rec.get("attributedConv
 
 @app.get("/api/sp/st_range")
 def sp_search_terms_range(start: str, end: str, limit: int = 1000):
