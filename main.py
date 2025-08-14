@@ -875,6 +875,8 @@ def create_st_table():
       date           date NOT NULL,
       -- grain: a search term performance row is scoped by campaign/ad_group/day
       search_term    text NOT NULL,
+      keyword_id     text,
+      keyword_text   text,
       match_type     text NOT NULL,
 
       campaign_id    text NOT NULL,
