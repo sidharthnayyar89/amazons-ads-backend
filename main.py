@@ -1386,8 +1386,8 @@ def _process_st_report_in_bg(report_id: str):
                 pulled_at = now()
         """)
 
-    with engine.begin() as conn:
-            conn.execute(upsert_sql, rows)
+with engine.begin() as conn:
+        conn.execute(upsert_sql, rows)
 
         print(f"[st_report_done] {report_id} rows={len(rows)}")
 
@@ -1421,8 +1421,8 @@ def sp_search_terms_range(start: str, end: str, limit: int = 1000):
         ORDER BY date DESC, campaign_name, ad_group_name, search_term
         LIMIT :lim
     """)
-    with engine.begin() as conn:
-        rows = conn.execute(q, {"pid": pid, "start_d": start_d, "end_d": end_d, "lim": limit}).mappings().all()
+with engine.begin() as conn:
+    rows = conn.execute(q, {"pid": pid, "start_d": start_d, "end_d": end_d, "lim": limit}).mappings().all()
     return [dict(r) for r in rows]
 
 # ---- SP SEARCH TERMS: fetch & upsert (sync) ----
