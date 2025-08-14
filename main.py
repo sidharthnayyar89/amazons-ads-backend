@@ -1250,7 +1250,7 @@ def sp_search_terms_start(lookback_days: int = 2):
                 "adGroupId", "adGroupName",
                 "searchTerm", "matchType",
                 "impressions", "clicks", "cost",
-                "sales14d", "purchases14d"
+                "attributedsales14d", "attributedconversions14d"
             ],
             "format": "GZIP_JSON"
         }
