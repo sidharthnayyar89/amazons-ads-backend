@@ -1646,3 +1646,83 @@ def migrate_st_add_keyword_cols():
         conn.exec_driver_sql(sql)
     return {"ok": True, "changed": ["keyword_id", "keyword_text"]}
 
+@app.post("/api/debug/migrate_st_mapping_history")
+def migrate_st_mapping_history():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    ddl = """
+    -- 1) History table for mapping changes
+    CREATE TABLE IF NOT EXISTS fact_sp_search_term_map_history (
+      id               bigserial PRIMARY KEY,
+      profile_id       text NOT NULL,
+      date             date NOT NULL,                  -- date of the NEW fact row
+      campaign_id      text NOT NULL,
+      ad_group_id      text NOT NULL,
+      search_term      text NOT NULL,
+      match_type       text NOT NULL,                  -- NEW match_type
+      old_keyword_id   text,
+      old_keyword_text text,
+      new_keyword_id   text,
+      new_keyword_text text,
+      run_id           uuid,
+      changed_at       timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_st_map_hist_when
+      ON fact_sp_search_term_map_history (changed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_st_map_hist_lookup
+      ON fact_sp_search_term_map_history (profile_id, search_term, ad_group_id, date);
+
+    -- 2) Trigger function: log when keyword mapping or match_type changes
+    CREATE OR REPLACE FUNCTION trg_log_st_keyword_mapping_change()
+    RETURNS trigger AS $$
+    BEGIN
+      IF
+        COALESCE(OLD.keyword_id,  '') IS DISTINCT FROM COALESCE(NEW.keyword_id,  '') OR
+        COALESCE(OLD.keyword_text,'') IS DISTINCT FROM COALESCE(NEW.keyword_text,'') OR
+        COALESCE(OLD.match_type,  '') IS DISTINCT FROM COALESCE(NEW.match_type,  '')
+      THEN
+        INSERT INTO fact_sp_search_term_map_history (
+          profile_id, date, campaign_id, ad_group_id, search_term, match_type,
+          old_keyword_id, old_keyword_text, new_keyword_id, new_keyword_text,
+          run_id
+        )
+        VALUES (
+          OLD.profile_id, NEW.date, NEW.campaign_id, NEW.ad_group_id, NEW.search_term, NEW.match_type,
+          OLD.keyword_id, OLD.keyword_text, NEW.keyword_id, NEW.keyword_text,
+          NEW.run_id
+        );
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    -- 3) Attach trigger to the fact table (idempotent)
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema='public' AND table_name='fact_sp_search_term_daily'
+      ) THEN
+        -- drop if exists to be idempotent
+        IF EXISTS (
+          SELECT 1 FROM pg_trigger WHERE tgname = 'trg_after_update_st_map_change'
+        ) THEN
+          EXECUTE 'DROP TRIGGER trg_after_update_st_map_change ON fact_sp_search_term_daily';
+        END IF;
+        EXECUTE '
+          CREATE TRIGGER trg_after_update_st_map_change
+          AFTER UPDATE OF keyword_id, keyword_text, match_type
+          ON fact_sp_search_term_daily
+          FOR EACH ROW
+          EXECUTE FUNCTION trg_log_st_keyword_mapping_change()
+        ';
+      END IF;
+    END$$;
+    """
+
+    with engine.begin() as conn:
+        conn.exec_driver_sql(ddl)
+
+    return {"ok": True, "objects": ["fact_sp_search_term_map_history", "trg_log_st_keyword_mapping_change", "trg_after_update_st_map_change"]}
