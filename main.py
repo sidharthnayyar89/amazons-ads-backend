@@ -1393,7 +1393,7 @@ def _process_st_report_in_bg(report_id: str):
                 :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
                 :cpc, :ctr, :acos, :roas, :run_id
             )
-            ON CONFLICT (profile_id, date, ad_group_id, search_term) DO UPDATE SET
+            ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
                 campaign_id = EXCLUDED.campaign_id,
                 campaign_name = EXCLUDED.campaign_name,
                 ad_group_id = EXCLUDED.ad_group_id,
