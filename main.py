@@ -1350,51 +1350,52 @@ def _process_st_report_in_bg(report_id: str):
         if not rows or not engine:
             print("[st_no_rows_or_db]", len(rows)); return
 
-        upsert_sql = text("""
-            INSERT INTO fact_sp_search_term_daily (
-                profile_id, date,
-                campaign_id, campaign_name, ad_group_id, ad_group_name,
-                search_term, keyword_id, keyword_text, match_type,
-                impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
-                cpc, ctr, acos, roas, run_id
-            )
-            VALUES (
-                :profile_id, :date,
-                :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
-                :search_term, :keyword_id, :keyword_text, :match_type,
-                :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
-                :cpc, :ctr, :acos, :roas, :run_id
-            )
-            ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
-                campaign_id = EXCLUDED.campaign_id,
-                campaign_name = EXCLUDED.campaign_name,
-                ad_group_id = EXCLUDED.ad_group_id,
-                ad_group_name = EXCLUDED.ad_group_name,
-                keyword_id = EXCLUDED.keyword_id,
-                keyword_text = EXCLUDED.keyword_text,
-                match_type = EXCLUDED.match_type,
-                impressions = EXCLUDED.impressions,
-                clicks = EXCLUDED.clicks,
-                cost = EXCLUDED.cost,
-                attributed_sales_14d = EXCLUDED.attributed_sales_14d,
-                attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
-                cpc = EXCLUDED.cpc,
-                ctr = EXCLUDED.ctr,
-                acos = EXCLUDED.acos,
-                roas = EXCLUDED.roas,
-                run_id = EXCLUDED.run_id,
-                pulled_at = now()
-        """)
+            upsert_sql = text("""
+        INSERT INTO fact_sp_search_term_daily (
+            profile_id, date,
+            campaign_id, campaign_name, ad_group_id, ad_group_name,
+            search_term, keyword_id, keyword_text, match_type,
+            impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+            cpc, ctr, acos, roas, run_id
+        )
+        VALUES (
+            :profile_id, :date,
+            :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+            :search_term, :keyword_id, :keyword_text, :match_type,
+            :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
+            :cpc, :ctr, :acos, :roas, :run_id
+        )
+        ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
+            campaign_id = EXCLUDED.campaign_id,
+            campaign_name = EXCLUDED.campaign_name,
+            ad_group_id = EXCLUDED.ad_group_id,
+            ad_group_name = EXCLUDED.ad_group_name,
+            keyword_id = EXCLUDED.keyword_id,
+            keyword_text = EXCLUDED.keyword_text,
+            match_type = EXCLUDED.match_type,
+            impressions = EXCLUDED.impressions,
+            clicks = EXCLUDED.clicks,
+            cost = EXCLUDED.cost,
+            attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+            attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+            cpc = EXCLUDED.cpc,
+            ctr = EXCLUDED.ctr,
+            acos = EXCLUDED.acos,
+            roas = EXCLUDED.roas,
+            run_id = EXCLUDED.run_id,
+            pulled_at = now()
+    """)
 
-with engine.begin() as conn:
+    # ✅ This MUST be indented under the same try: as the rest of the code
+    with engine.begin() as conn:
         conn.execute(upsert_sql, rows)
 
-        print(f"[st_report_done] {report_id} rows={len(rows)}")
+    print(f"[st_report_done] {report_id} rows={len(rows)}")
 
-    except Exception as e:
-        import traceback
-        print("[st_bg_error]", e)
-        traceback.print_exc()
+except Exception as e:
+    import traceback
+    print("[st_bg_error]", e)
+    traceback.print_exc()
 
 @app.get("/api/sp/st_range")
 def sp_search_terms_range(start: str, end: str, limit: int = 1000):
