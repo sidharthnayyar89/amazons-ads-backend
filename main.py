@@ -1336,7 +1336,89 @@ def _process_st_report_in_bg(report_id: str):
             clicks = int(rec.get("clicks") or 0)
             cost = float(rec.get("cost") or 0.0)
             sales = float(rec.get("attributedSales14d") or 0.0)
-            orders = int(rec.get("attributedConversions14d", 0) or 0)
+            orders = int(rec.get("attributedConversions14d") or 0)
+
+            cpc  = round(cost / clicks, 6) if clicks else 0.0
+            ctr  = round(clicks / impressions, 6) if impressions else 0.0
+            acos = round(cost / sales, 6) if sales else 0.0
+            roas = round(sales / cost, 6) if cost else 0.0
+
+            rows.append({
+                "profile_id": pid,
+                "date": ds,
+                "campaign_id": campaign_id,
+                "campaign_name": campaign_name,
+                "ad_group_id": ad_group_id,
+                "ad_group_name": ad_group_name,
+                "search_term": search_term,
+                "keyword_id": (keyword_id or None),
+                "keyword_text": (keyword_text or None),
+                "match_type": match_type,
+                "impressions": impressions,
+                "clicks": clicks,
+                "cost": cost,
+                "attributed_sales_14d": sales,
+                "attributed_conversions_14d": orders,
+                "cpc": cpc,
+                "ctr": ctr,
+                "acos": acos,
+                "roas": roas,
+                "run_id": run_id,
+            })
+
+        if not engine:
+            print("[st_no_rows_or_db] no engine")
+            return
+        if not rows:
+            print("[st_no_rows_or_db] 0 rows")
+            return
+
+        # --- UPSERT all rows ---
+        upsert_sql = _text("""
+            INSERT INTO fact_sp_search_term_daily (
+                profile_id, date,
+                campaign_id, campaign_name, ad_group_id, ad_group_name,
+                search_term, keyword_id, keyword_text, match_type,
+                impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+                cpc, ctr, acos, roas, run_id, pulled_at
+            )
+            VALUES (
+                :profile_id, :date,
+                :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+                :search_term, :keyword_id, :keyword_text, :match_type,
+                :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
+                :cpc, :ctr, :acos, :roas, :run_id, now()
+            )
+            ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
+                campaign_id = EXCLUDED.campaign_id,
+                campaign_name = EXCLUDED.campaign_name,
+                ad_group_id = EXCLUDED.ad_group_id,
+                ad_group_name = EXCLUDED.ad_group_name,
+                keyword_id = EXCLUDED.keyword_id,
+                keyword_text = EXCLUDED.keyword_text,
+                match_type = EXCLUDED.match_type,
+                impressions = EXCLUDED.impressions,
+                clicks = EXCLUDED.clicks,
+                cost = EXCLUDED.cost,
+                attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+                attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+                cpc = EXCLUDED.cpc,
+                ctr = EXCLUDED.ctr,
+                acos = EXCLUDED.acos,
+                roas = EXCLUDED.roas,
+                run_id = EXCLUDED.run_id,
+                pulled_at = now()
+        """)
+
+        with engine.begin() as conn:
+            conn.execute(upsert_sql, rows)
+
+        print(f"[st_report_done] {report_id} rows={len(rows)}")
+
+    except Exception as e:
+        import traceback
+        print("[st_bg_error]", e)
+        traceback.print_exc()
 
 @app.get("/api/sp/st_range")
 def sp_search_terms_range(start: str, end: str, limit: int = 1000):
