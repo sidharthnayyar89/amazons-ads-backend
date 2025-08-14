@@ -2,93 +2,342 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Amazon Ads — Keywords</title>
+  <title>Ads Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: ui-sans-serif, system-ui, Arial; padding: 24px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { padding: 8px 10px; border-top: 1px solid #eee; text-align: right; }
-    th:nth-child(1), td:nth-child(1),
-    th:nth-child(2), td:nth-child(2),
-    th:nth-child(3), td:nth-child(3) { text-align: left; }
-    thead th { background: #fafafa; }
-    .controls { display: grid; grid-template-columns: repeat(4,minmax(0,220px)); gap: 8px; margin-bottom: 12px; }
-    .muted { color: #666; font-size: 12px; margin-top: 8px; }
+    :root{
+      --sidebar-w: 260px;
+      --rightpanel-w: 300px;
+      --bg: #0e1117;
+      --bg-2: #1b2230;
+      --ink: #e7eefc;
+      --muted: #98a6c3;
+      --brand: #9ccaff;
+      --surface: #ffffff;
+      --surface-2: #f6f8fb;
+      --surface-3: #f2f6fb;
+      --border: #e8eef6;
+    }
+    * { box-sizing: border-box; }
+    html, body { height:100%; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background: var(--surface-2); color:#1a2433; }
+
+    /* Fixed left nav */
+    .sidebar{
+      position: fixed; inset: 0 auto 0 0; width: var(--sidebar-w);
+      background: var(--bg); color: var(--ink); padding: 20px;
+      display:flex; flex-direction:column; gap:16px; border-right:1px solid #20283a;
+    }
+    .sidebar h2{ margin:0; font-size:13px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color: var(--brand); }
+    .nav .group{ margin-top:6px; }
+    .nav h3{ margin:14px 0 8px; font-size:12px; color: var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+    .nav a{
+      display:block; padding:10px 12px; color:#dfe6f3; text-decoration:none; border-radius:8px;
+    }
+    .nav a:hover{ background: var(--bg-2); }
+    .nav a.active{ background:#2a364a; color:#fff; }
+
+    /* Fixed right date panel */
+    .rightpanel{
+      position: fixed; inset: 0 0 0 auto; width: var(--rightpanel-w);
+      background: #fff; border-left:1px solid var(--border); padding: 16px 16px 20px;
+      display:flex; flex-direction:column; gap:12px;
+    }
+    .rp-title{ font-size:14px; font-weight:700; color:#2b3a52; }
+    .form-row{ display:grid; grid-template-columns: 1fr; gap:8px; }
+    label{ font-size:12px; color:#314258; display:flex; flex-direction:column; gap:6px; }
+    input[type="date"]{
+      padding:8px 10px; border:1px solid #ccd6e5; border-radius:8px; background:#fff; font-size:13px;
+    }
+    .btn-row{ display:flex; gap:8px; flex-wrap:wrap; }
+    button{
+      padding:8px 10px; border-radius:8px; border:1px solid #ccd6e5; background:#fff; cursor:pointer; font-size:13px;
+    }
+    button.primary{ background:#1f6feb; color:#fff; border-color:#1f6feb; }
+    button.ghost{ background:#fff; }
+    .hint{ font-size:12px; color:#6b7a90; }
+
+    /* Center content (scrolls) */
+    .main{
+      margin-left: var(--sidebar-w);
+      margin-right: var(--rightpanel-w);
+      min-height: 100vh;
+      padding: 18px 20px 28px;
+    }
+    .page-title{ font-size:18px; font-weight:700; margin:4px 0 12px; color:#2b3a52; }
+
+    .card{
+      background:#fff; border:1px solid var(--border); border-radius:12px; padding: 0; overflow:hidden;
+      box-shadow: 0 1px 0 rgba(10, 31, 68, 0.04);
+    }
+
+    /* Table */
+    table{ width:100%; border-collapse:collapse; }
+    th, td{ padding:10px 12px; border-bottom:1px solid var(--border); font-size:13px; text-align:left; }
+    thead th{ background: var(--surface-3); color:#4a5a73; position: sticky; top: 0; z-index: 1; }
+    tbody tr:hover{ background:#fcfdff; }
+    .muted{ color:#6b7a90; font-weight:500; }
+
+    /* Status toast area */
+    .status{ margin-left:6px; font-size:12px; color:#6b7a90; }
+
+    /* Responsive */
+    @media (max-width: 1100px){
+      :root{ --rightpanel-w: 280px; --sidebar-w: 240px; }
+      th, td{ font-size:12px; }
+    }
+    @media (max-width: 900px){
+      .rightpanel{ position: static; width: auto; border-left: none; border-top:1px solid var(--border); }
+      .main{ margin-right: 0; }
+      .sidebar{ position: static; width: auto; border-right: none; }
+      .main{ margin-left: 0; }
+    }
   </style>
 </head>
 <body>
-  <h1>Amazon Ads — Pull Data</h1>
 
-  <div class="controls">
-    <input id="q" placeholder="Search campaign/ad group/keyword" />
-    <select id="marketplace"><option>IN</option><option>US</option><option>UK</option></select>
-    <input id="lookback" type="number" min="1" max="60" value="14" />
-    <input id="buffer" type="number" min="0" max="7" value="1" />
-  </div>
+  <!-- Left: fixed navigation -->
+  <aside class="sidebar">
+    <h2>Advertising Data</h2>
+    <nav class="nav">
+      <div class="group">
+        <a href="/ads/keywords" id="nav-keywords">Keyword Data</a>
+        <a href="/ads/search-terms" id="nav-search">Search Terms</a>
+      </div>
+    </nav>
+    <div class="hint">The left panel stays fixed on every page.</div>
+  </aside>
 
-  <table id="tbl">
-    <thead>
-      <tr>
-        <th>Campaign</th><th>Ad Group</th><th>Keyword</th><th>Match</th><th>Bid</th>
-        <th>Clicks</th><th>Impr</th><th>Spend</th><th>Sales</th><th>Orders</th>
-        <th>CTR</th><th>CPC</th><th>ACOS</th><th>ROAS</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  <!-- Right: fixed date panel -->
+  <aside class="rightpanel">
+    <div class="rp-title">Date Range</div>
+    <div class="form-row">
+      <label>Start date
+        <input id="start" type="date" />
+      </label>
+      <label>End date
+        <input id="end" type="date" />
+      </label>
+    </div>
 
-  <div class="muted" id="count"></div>
+    <div class="btn-row">
+      <button class="ghost" onclick="quick(7)">Last 7d</button>
+      <button class="ghost" onclick="quick(14)">Last 14d</button>
+      <button class="ghost" onclick="quick(30)">Last 30d</button>
+    </div>
 
-  <script>
-    const $ = (s)=>document.querySelector(s);
-    const fmt = (n)=>Number(n).toLocaleString();
+    <div class="btn-row">
+      <button class="primary" onclick="loadPage()">Load</button>
+      <button class="ghost" id="btn-refresh" onclick="refreshCurrent()">Fetch latest</button>
+    </div>
 
-    async function load(){
-      const m = $('#marketplace').value;
-      const lb = $('#lookback').value;
-      const bf = $('#buffer').value;
-      const res = await fetch(`/api/sp/keywords?marketplace=${m}&lookback_days=${lb}&buffer_days=${bf}&limit=500`);
-      if(!res.ok){ alert('API error '+res.status); return; }
-      const rows = await res.json();
+    <div class="hint">
+      Data is typically complete through <b>yesterday</b>.
+      <div id="status" class="status"></div>
+    </div>
+  </aside>
 
-      const needle = $('#q').value.trim().toLowerCase();
-      const filtered = needle ? rows.filter(r =>
-        r.campaign_name.toLowerCase().includes(needle) ||
-        r.ad_group_name.toLowerCase().includes(needle) ||
-        r.keyword_text.toLowerCase().includes(needle)
-      ) : rows;
+  <!-- Center: main content -->
+  <main class="main">
+    <div class="page-title" id="page-title">Advertising</div>
 
-      const tbody = $('#tbl tbody'); tbody.innerHTML = '';
-      for(const r of filtered){
+    <!-- Card: table -->
+    <div class="card">
+      <!-- Keyword page -->
+      <div id="page-keywords" style="display:none;">
+        <table id="tbl-keywords">
+          <thead>
+            <tr>
+              <th>Date</th><th>Campaign</th><th>Ad Group</th><th>Keyword</th><th>Match</th>
+              <th>Impr</th><th>Clicks</th><th>Cost</th><th>Sales</th><th>Orders</th>
+              <th>CPC</th><th>CTR</th><th>ACOS</th><th>ROAS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- Search Terms page -->
+      <div id="page-search" style="display:none;">
+        <table id="tbl-search">
+          <thead>
+            <tr>
+              <th>Date</th><th>Campaign</th><th>Ad Group</th><th>Search Term</th><th>Keyword</th><th>Match</th>
+              <th>Impr</th><th>Clicks</th><th>Cost</th><th>Sales</th><th>Orders</th>
+              <th>CPC</th><th>CTR</th><th>ACOS</th><th>ROAS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+<script>
+/* ---------- helpers ---------- */
+function iso(d){ return d.toISOString().slice(0,10); }
+function fmt(n){ return (typeof n==='number') ? n.toLocaleString(undefined,{maximumFractionDigits:2}) : (n ?? ''); }
+function activateNav(path) {
+  document.getElementById('nav-keywords').classList.toggle('active', path==='/ads/keywords');
+  document.getElementById('nav-search').classList.toggle('active', path==='/ads/search-terms');
+}
+function showPage(path){
+  const title = document.getElementById('page-title');
+  const kw = document.getElementById('page-keywords');
+  const st = document.getElementById('page-search');
+
+  if (path === '/ads/search-terms') {
+    title.textContent = 'Advertising / Search Terms';
+    kw.style.display = 'none';
+    st.style.display = 'block';
+  } else {
+    title.textContent = 'Advertising / Keyword Data';
+    kw.style.display = 'block';
+    st.style.display = 'none';
+  }
+  activateNav(path);
+}
+function setDefaults() {
+  const end = new Date();
+  end.setDate(end.getDate() - 1);           // yesterday
+  const start = new Date(end);
+  start.setDate(end.getDate() - 13);        // last 14 days
+  document.getElementById('start').value = iso(start);
+  document.getElementById('end').value = iso(end);
+}
+function quick(days){
+  const end = new Date(); end.setDate(end.getDate() - 1);
+  const start = new Date(end); start.setDate(end.getDate() - (days-1));
+  document.getElementById('start').value = iso(start);
+  document.getElementById('end').value = iso(end);
+  loadPage();
+}
+
+/* ---------- data loaders ---------- */
+async function loadPage(){
+  const s = document.getElementById('start').value;
+  const e = document.getElementById('end').value;
+  const status = document.getElementById('status');
+  const path = window.location.pathname;
+
+  try{
+    status.textContent = 'Loading...';
+
+    if (path === '/ads/search-terms') {
+      const r = await fetch(`/api/sp/st_range?start=${s}&end=${e}&limit=1000`);
+      if(!r.ok) throw new Error('Failed to load Search Terms');
+      const rows = await r.json();
+      const tb = document.querySelector('#tbl-search tbody');
+      tb.innerHTML = '';
+      rows.forEach(x=>{
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td>${r.campaign_name}</td>
-          <td>${r.ad_group_name}</td>
-          <td>${r.keyword_text}</td>
-          <td>${r.match_type}</td>
-          <td>${r.bid.toFixed(2)}</td>
-          <td>${fmt(r.metrics.clicks)}</td>
-          <td>${fmt(r.metrics.impressions)}</td>
-          <td>₹${r.metrics.spend.toFixed(2)}</td>
-          <td>₹${r.metrics.sales.toFixed(2)}</td>
-          <td>${fmt(r.metrics.orders)}</td>
-          <td>${(r.metrics.ctr*100).toFixed(2)}%</td>
-          <td>₹${r.metrics.cpc.toFixed(2)}</td>
-          <td>${(r.metrics.acos*100).toFixed(2)}%</td>
-          <td>${r.metrics.roas.toFixed(2)}x</td>
+          <td>${x.date}</td>
+          <td>${x.campaign_name}</td>
+          <td>${x.ad_group_name}</td>
+          <td>${x.search_term}</td>
+          <td>${x.keyword_text ?? ''}</td>
+          <td>${x.match_type}</td>
+          <td>${fmt(x.impressions)}</td>
+          <td>${fmt(x.clicks)}</td>
+          <td>${fmt(x.cost)}</td>
+          <td>${fmt(x.attributed_sales_14d)}</td>
+          <td>${fmt(x.attributed_conversions_14d)}</td>
+          <td>${fmt(x.cpc)}</td>
+          <td>${fmt(x.ctr)}</td>
+          <td>${fmt(x.acos)}</td>
+          <td>${fmt(x.roas)}</td>
         `;
-        tbody.appendChild(tr);
-      }
-      $('#count').textContent = `${filtered.length} rows`;
+        tb.appendChild(tr);
+      });
+    } else {
+      const r = await fetch(`/api/sp/keywords_range?start=${s}&end=${e}&limit=1000`);
+      if(!r.ok) throw new Error('Failed to load Keywords');
+      const rows = await r.json();
+      const tb = document.querySelector('#tbl-keywords tbody');
+      tb.innerHTML = '';
+      rows.forEach(x=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${x.pulled_at || x.date || ''}</td>
+          <td>${x.campaign_name}</td>
+          <td>${x.ad_group_name}</td>
+          <td>${x.keyword_text}</td>
+          <td>${x.match_type}</td>
+          <td>${fmt(x.metrics?.impressions ?? x.impressions)}</td>
+          <td>${fmt(x.metrics?.clicks ?? x.clicks)}</td>
+          <td>${fmt(x.metrics?.spend ?? x.cost)}</td>
+          <td>${fmt(x.metrics?.sales ?? x.attributed_sales_14d)}</td>
+          <td>${fmt(x.metrics?.orders ?? x.attributed_conversions_14d)}</td>
+          <td>${fmt(x.metrics?.cpc ?? x.cpc)}</td>
+          <td>${fmt(x.metrics?.ctr ?? x.ctr)}</td>
+          <td>${fmt(x.metrics?.acos ?? x.acos)}</td>
+          <td>${fmt(x.metrics?.roas ?? x.roas)}</td>
+        `;
+        tb.appendChild(tr);
+      });
     }
 
-    // Hook up controls
-    $('#q').addEventListener('input', load);
-    $('#marketplace').addEventListener('change', load);
-    $('#lookback').addEventListener('change', load);
-    $('#buffer').addEventListener('change', load);
+    status.textContent = '';
+  }catch(err){
+    console.error(err);
+    status.textContent = 'Error: ' + (err?.message || 'see console');
+  }
+}
 
-    // First load
-    load();
-  </script>
+/* ---------- one-click fetch latest (optional) ---------- */
+async function refreshCurrent(){
+  const status = document.getElementById('status');
+  const path = window.location.pathname;
+  const isST = path === '/ads/search-terms';
+
+  // Only wired for Search Terms at the moment (can add keywords similarly)
+  if (!isST){
+    status.textContent = 'Use Load after changing dates.';
+    return;
+  }
+
+  try {
+    status.textContent = 'Creating report...';
+    const createRes = await fetch('/api/sp/st_start?lookback_days=14', { method: 'POST' });
+    if (!createRes.ok) throw new Error('Failed to create report');
+    const { report_id } = await createRes.json();
+
+    status.textContent = 'Waiting for Amazon...';
+    const maxWaitMs = 180000;
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      await new Promise(r => setTimeout(r, 3000));
+      const st = await fetch(`/api/sp/report_status?report_id=${report_id}`);
+      if (!st.ok) throw new Error('Report status error');
+      const meta = await st.json();
+      if (meta.status === 'SUCCESS' || meta.status === 'COMPLETED') break;
+      if (meta.status === 'FAILURE' || meta.status === 'CANCELLED') throw new Error('Report failed/cancelled');
+    }
+
+    status.textContent = 'Ingesting...';
+    const ingest = await fetch(`/api/sp/st_fetch?report_id=${report_id}&limit=50000`, { method: 'POST' });
+    if (!ingest.ok) throw new Error('Ingest failed');
+
+    status.textContent = 'Refreshing table...';
+    await loadPage();
+    status.textContent = 'Done.';
+  } catch (err) {
+    console.error(err);
+    status.textContent = 'Error: ' + (err?.message || 'see console');
+  }
+}
+
+/* ---------- boot ---------- */
+(function boot(){
+  if (window.location.pathname === '/') {
+    window.location.replace('/ads/keywords');
+    return;
+  }
+  setDefaults();
+  showPage(window.location.pathname);
+  loadPage();
+})();
+</script>
 </body>
 </html>
