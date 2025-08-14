@@ -12,7 +12,7 @@ import urllib.parse
 import json
 import httpx
 BACKFILL_WAIT_SECS = 3600
-DAILY_WAIT_SECS = 900
+DAILY_WAIT_SECS = 1500
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine, text
 DB_URL = os.environ.get("DATABASE_URL")
@@ -2065,4 +2065,57 @@ def daily_ingest(background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_st_backfill, y, y, 1, DAILY_WAIT_SECS)
     background_tasks.add_task(_run_kw_backfill, y, y, 1, DAILY_WAIT_SECS)
     return {"status":"QUEUED","date":_ymd(y), "wait_seconds": DAILY_WAIT_SECS}
-   
+
+# ================================
+# Daily ingest endpoint (cron-friendly)
+# ================================
+import datetime as _dt
+from fastapi import BackgroundTasks
+
+# Optional simple auth: set DAILY_INGEST_KEY in Render (e.g., supersecret123)
+DAILY_INGEST_KEY = os.environ.get("DAILY_INGEST_KEY", "").strip()
+
+@app.post("/api/tasks/daily_ingest")
+def daily_ingest(background_tasks: BackgroundTasks, key: str = "", date: str | None = None):
+    """
+    Triggers ingestion for a single day (defaults to *yesterday*).
+    - Runs BOTH: keywords + search terms
+    - Uses DAILY_WAIT_SECS (your 15-min wait)
+    - Runs in background and returns immediately
+    - Optional auth via ?key=... and env DAILY_INGEST_KEY
+    - Optional ?date=YYYY-MM-DD to override target day
+    """
+    # Simple shared-secret check (optional)
+    if DAILY_INGEST_KEY:
+        if not key or key != DAILY_INGEST_KEY:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Determine target date
+    if date:
+        try:
+            target = _dt.date.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    else:
+        target = _dt.date.today() - _dt.timedelta(days=1)
+
+    def _job():
+        print(f"[daily_ingest] Starting for {target} (wait={DAILY_WAIT_SECS}s)")
+        try:
+            # One-day chunks + daily wait
+            _run_kw_backfill(target, target, chunk_days=1, wait_seconds=DAILY_WAIT_SECS)
+            _run_st_backfill(target, target, chunk_days=1, wait_seconds=DAILY_WAIT_SECS)
+            print(f"[daily_ingest] ✅ Completed for {target}")
+        except Exception as e:
+            import traceback
+            print(f"[daily_ingest] ❌ Error for {target}: {e}")
+            traceback.print_exc()
+
+    background_tasks.add_task(_job)
+    return {
+        "status": "QUEUED",
+        "target_date": target.isoformat(),
+        "wait_seconds": DAILY_WAIT_SECS,
+        "jobs": ["keywords", "search_terms"]
+    }
+
