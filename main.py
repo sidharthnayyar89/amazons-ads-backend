@@ -2294,17 +2294,13 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                 RETURNING xmax = 0 AS inserted_flag
             """)
 
-            inserted = updated = 0
             with engine.begin() as conn:
                 for i in range(0, len(rows), 1000):
                     batch = rows[i:i+1000]
-                    res = conn.execute(upsert_sql, batch).fetchall()
-                    for r in res:
-                        if r[0] is True:
-                            inserted += 1
-                        else:
-                            updated += 1
-
+                    conn.execute(upsert_sql, batch)
+                    BACKFILL_STATUS["kw"]["processed"] += len(batch)
+            _bf_set(last_event=f"KW upserted {len(rows)} rows (insert/update split not tracked)")
+                   
             BACKFILL_STATUS["kw"]["inserted"] += inserted
             BACKFILL_STATUS["kw"]["updated"] += updated
             _bf_set(last_event=f"KW upserted: {inserted} inserted, {updated} updated")
@@ -2315,7 +2311,7 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
         cur = chunk_end + timedelta(days=1)
 
     BACKFILL_STATUS["active"] = False
-    BACKFILL_STATUS["finished_at"] = datetime.now(timezone.utc).isoformat()
+    BACKFILL_STATUS["finished_at"] = _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
 
 # ====== DAILY INGEST (yesterday) ======
 @app.post("/api/tasks/daily_ingest")
