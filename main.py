@@ -2031,19 +2031,15 @@ def backfill_keywords(days: int = 65, chunk_days: int = 14, background_tasks: Ba
         background_tasks.add_task(_run_kw_backfill, start, end, chunk_days)
     return {"status":"QUEUED","type":"keywords","start":_ymd(start),"end":_ymd(end),"chunk_days":chunk_days}
 
-def _run_kw_backfill(start_date: str, end_date: str, chunk_days: int = 7, wait_seconds: int = BACKFILL_WAIT_SECS):
-    """
-    Backfill Sponsored Products keyword reports from Amazon Ads API.
-    Handles NDJSON, JSON arrays, or dict payloads safely.
-    """
-    global BACKFILL_STATUS
+from datetime import datetime, timezone
+
+def _run_kw_backfill(start_date, end_date, chunk_days=30, wait_seconds=10):
     BACKFILL_STATUS["active"] = True
     BACKFILL_STATUS["mode"] = "backfill"
-    BACKFILL_STATUS["started_at"] = datetime.utcnow().isoformat()
+    BACKFILL_STATUS["started_at"] = datetime.now(timezone.utc).isoformat()
     BACKFILL_STATUS["finished_at"] = None
     BACKFILL_STATUS["kw"] = {"processed": 0, "inserted": 0, "updated": 0, "errors": 0}
     BACKFILL_STATUS["last_error"] = None
-    _bf_set(last_event="starting KW backfill")
 
     try:
         s = date.fromisoformat(start_date)
@@ -2241,7 +2237,7 @@ def _run_kw_backfill(start_date: str, end_date: str, chunk_days: int = 7, wait_s
         cur = chunk_end + timedelta(days=1)
 
     BACKFILL_STATUS["active"] = False
-    BACKFILL_STATUS["finished_at"] = datetime.utcnow().isoformat()
+    BACKFILL_STATUS["finished_at"] = datetime.utc().isoformat()
 
 # ====== DAILY INGEST (yesterday) ======
 @app.post("/api/tasks/daily_ingest")
