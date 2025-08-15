@@ -2407,3 +2407,22 @@ def _bf_set(**k):
 def backfill_status():
     return BACKFILL_STATUS
 
+@app.api_route("/api/tasks/run_day_sync", methods=["GET","POST"])
+def run_day_sync(date: str, key: str = ""):
+    if DAILY_INGEST_KEY and key != DAILY_INGEST_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    import datetime as _dt
+    d = _dt.date.fromisoformat(date)
+    _bf_set(active=True, mode="test", started_at=_dt.datetime.utcnow().isoformat(),
+            finished_at=None, current_chunk=f"{d} -> {d}",
+            kw={"processed":0,"inserted":0,"updated":0,"errors":0},
+            st={"processed":0,"inserted":0,"updated":0,"errors":0},
+            last_error=None)
+    try:
+        wait = int(os.environ.get("DAILY_WAIT_SECS", "900"))  # 15m default
+        _run_kw_backfill(d, d, chunk_days=1, wait_seconds=wait)
+        _run_st_backfill(d, d, chunk_days=1, wait_seconds=wait)
+        return {"ok": True, "date": date, "status": BACKFILL_STATUS}
+    finally:
+        import datetime as _dt
+        _bf_set(active=False, finished_at=_dt.datetime.utcnow().isoformat())
