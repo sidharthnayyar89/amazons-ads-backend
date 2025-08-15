@@ -2167,16 +2167,20 @@ def backfill_range(background_tasks: BackgroundTasks, start: str, end: str, chun
         raise HTTPException(status_code=400, detail="chunk must be between 1 and 30 days")
 
     def _job():
-        print(f"[backfill_range] KW+ST {s} → {e} in {chunk}d chunks (wait={BACKFILL_WAIT_SECS}s)")
+        import datetime as _dt
+        _bf_set(active=True, mode="backfill", started_at=_dt.datetime.utcnow().isoformat(), finished_at=None,
+                kw={"processed":0,"inserted":0,"updated":0,"errors":0},
+                st={"processed":0,"inserted":0,"updated":0,"errors":0},
+                last_error=None)
         try:
             _run_kw_backfill(s, e, chunk_days=chunk, wait_seconds=BACKFILL_WAIT_SECS)
             _run_st_backfill(s, e, chunk_days=chunk, wait_seconds=BACKFILL_WAIT_SECS)
-            print(f"[backfill_range] ✅ Completed {s} → {e}")
         except Exception as ex:
-            import traceback
-            print(f"[backfill_range] ❌ Error {s} → {e}: {ex}")
-            traceback.print_exc()
-
+            _bf_set(last_error=f"{type(ex).__name__}: {ex}")
+            raise
+        finally:
+            _bf_set(active=False, finished_at=_dt.datetime.utcnow().isoformat())
+            
     background_tasks.add_task(_job)
     return {"status":"QUEUED","start":start,"end":end,"chunk_days":chunk,"wait_seconds":BACKFILL_WAIT_SECS}
 
