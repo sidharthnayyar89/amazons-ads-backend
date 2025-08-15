@@ -2026,20 +2026,12 @@ def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                 RETURNING xmax = 0 AS inserted_flag
             """)
 
-            inserted = updated = 0
             with engine.begin() as conn:
                 for i in range(0, len(rows), 1000):
                     batch = rows[i:i+1000]
-                    res = conn.execute(upsert_sql, batch).fetchall()
-                    for r in res:
-                        if r[0] is True:
-                            inserted += 1
-                        else:
-                            updated += 1
-
-            BACKFILL_STATUS["st"]["inserted"] += inserted
-            BACKFILL_STATUS["st"]["updated"] += updated
-            _bf_set(last_event=f"ST upserted: {inserted} inserted, {updated} updated")
+                    conn.execute(upsert_sql, batch)
+                    BACKFILL_STATUS["st"]["processed"] += len(batch)
+             _bf_set(last_event=f"ST upserted {len(rows)} rows (insert/update split not tracked)")
         else:
             _bf_set(last_event="ST parsed 0 records (nothing to upsert)")
 
@@ -2047,7 +2039,7 @@ def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
         cur = chunk_end + timedelta(days=1)
 
     BACKFILL_STATUS["active"] = False
-    BACKFILL_STATUS["finished_at"] = datetime.now(timezone.utc).isoformat()
+    BACKFILL_STATUS["finished_at"] = _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
 
 # ====== KEYWORDS BACKFILL ======
 @app.post("/api/tasks/backfill_keywords")
