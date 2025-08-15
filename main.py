@@ -2147,3 +2147,36 @@ def debug_coverage():
             "rows": int(st["total"] or 0),
         }
     }
+
+# Backfill any date range (runs both KW + ST) in background
+@app.post("/api/tasks/backfill_range")
+def backfill_range(background_tasks: BackgroundTasks, start: str, end: str, chunk: int = 7, key: str = ""):
+    # reuse the same shared key as daily_ingest (optional auth)
+    if DAILY_INGEST_KEY:
+        if not key or key != DAILY_INGEST_KEY:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    import datetime as _dt
+    try:
+        s = _dt.date.fromisoformat(start)
+        e = _dt.date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD")
+    if s > e:
+        raise HTTPException(status_code=400, detail="start must be <= end")
+    if chunk < 1 or chunk > 30:
+        raise HTTPException(status_code=400, detail="chunk must be between 1 and 30 days")
+
+    def _job():
+        print(f"[backfill_range] KW+ST {s} → {e} in {chunk}d chunks (wait={BACKFILL_WAIT_SECS}s)")
+        try:
+            _run_kw_backfill(s, e, chunk_days=chunk, wait_seconds=BACKFILL_WAIT_SECS)
+            _run_st_backfill(s, e, chunk_days=chunk, wait_seconds=BACKFILL_WAIT_SECS)
+            print(f"[backfill_range] ✅ Completed {s} → {e}")
+        except Exception as ex:
+            import traceback
+            print(f"[backfill_range] ❌ Error {s} → {e}: {ex}")
+            traceback.print_exc()
+
+    background_tasks.add_task(_job)
+    return {"status":"QUEUED","start":start,"end":end,"chunk_days":chunk,"wait_seconds":BACKFILL_WAIT_SECS}
+
