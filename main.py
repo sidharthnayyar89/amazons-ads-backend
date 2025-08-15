@@ -2026,14 +2026,17 @@ def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                 RETURNING xmax = 0 AS inserted_flag
             """)
 
-            with engine.begin() as conn:
-                for i in range(0, len(rows), 1000):
-                    batch = rows[i:i+1000]
-                    conn.execute(upsert_sql, batch)
-                    BACKFILL_STATUS["st"]["processed"] += len(batch)
-            _bf_set(last_event=f"ST upserted {len(rows)} rows (insert/update split not tracked)")
-        else:
-            _bf_set(last_event="ST parsed 0 records (nothing to upsert)")
+    # --- Upsert (no RETURNING; don't call fetchall) ---
+    if rows:
+        with engine.begin() as conn:
+            for i in range(0, len(rows), 1000):
+                batch = rows[i:i+1000]
+                conn.execute(upsert_sql, batch)
+                BACKFILL_STATUS["st"]["processed"] += len(batch)
+
+        _bf_set(last_event=f"ST upserted {len(rows)} rows (insert/update split not tracked)")
+    else:
+        _bf_set(last_event="ST parsed 0 records (nothing to upsert)")
 
         BACKFILL_STATUS["st"]["processed"] += parsed
         cur = chunk_end + timedelta(days=1)
