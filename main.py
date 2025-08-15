@@ -2032,144 +2032,50 @@ def backfill_keywords(days: int = 65, chunk_days: int = 14, background_tasks: Ba
         background_tasks.add_task(_run_kw_backfill, start, end, chunk_days)
     return {"status":"QUEUED","type":"keywords","start":_ymd(start),"end":_ymd(end),"chunk_days":chunk_days}
 
-def _run_kw_backfill(start: "_dt.date", end: "_dt.date", chunk_days: int, wait_seconds: int | None = None):
+def _run_kw_backfill(start_date: str, end_date: str, chunk_days: int = 7, wait_seconds: int = BACKFILL_WAIT_SECS):
     """
-    Create+poll+download+upsert KW reports for [start, end] inclusive, in daily chunks.
-    Columns use Ads Reports v3 keywords schema:
-      date, campaignId, campaignName, adGroupId, adGroupName,
-      keywordId, keywordText, matchType, impressions, clicks, cost,
-      attributedSales14d, attributedConversions14d
-    Conflict key: (profile_id, date, keyword_id)
+    Backfill Sponsored Products keyword reports from Amazon Ads API.
+    Handles NDJSON, JSON arrays, or dict payloads safely.
     """
-    import datetime as _dt, time, io, gzip, json as _json, httpx
-    from sqlalchemy import text as _text
+    global BACKFILL_STATUS
+    BACKFILL_STATUS["active"] = True
+    BACKFILL_STATUS["mode"] = "backfill"
+    BACKFILL_STATUS["started_at"] = datetime.utcnow().isoformat()
+    BACKFILL_STATUS["finished_at"] = None
+    BACKFILL_STATUS["kw"] = {"processed": 0, "inserted": 0, "updated": 0, "errors": 0}
+    BACKFILL_STATUS["last_error"] = None
+    _bf_set(last_event="starting KW backfill")
 
-    if wait_seconds is None:
-        wait_seconds = BACKFILL_WAIT_SECS
+    try:
+        s = date.fromisoformat(start_date)
+        e = date.fromisoformat(end_date)
+    except ValueError:
+        BACKFILL_STATUS["active"] = False
+        _bf_set(last_error="Invalid date format")
+        return
 
-    pid = _env("AMZN_PROFILE_ID")
-    region = os.environ.get("AMZN_REGION", "NA").upper()
-    ads_base = _ads_base(region)
-    access = _get_access_token_from_refresh()
-    headers = _ads_headers(access)
+    chunk = timedelta(days=chunk_days)
+    cur = s
 
-    def _ymd(d: _dt.date) -> str:
-        return d.strftime("%Y-%m-%d")
+    while cur <= e:
+        chunk_end = min(cur + chunk - timedelta(days=1), e)
+        _bf_set(current_chunk=f"{cur} -> {chunk_end}", last_event="creating KW report")
 
-    # Upsert statement (same as your /api/sp/keywords_fetch)
-    upsert_sql = _text("""
-        INSERT INTO fact_sp_keyword_daily (
-            profile_id, date, keyword_id,
-            campaign_id, campaign_name, ad_group_id, ad_group_name,
-            keyword_text, match_type,
-            impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
-            cpc, ctr, acos, roas,
-            run_id, pulled_at
-        )
-        VALUES (
-            :profile_id, :date, :keyword_id,
-            :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
-            :keyword_text, :match_type,
-            :impressions, :clicks, :cost, :sales, :orders,
-            :cpc, :ctr, :acos, :roas,
-            :run_id, now()
-        )
-        ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
-            campaign_id = EXCLUDED.campaign_id,
-            campaign_name = EXCLUDED.campaign_name,
-            ad_group_id = EXCLUDED.ad_group_id,
-            ad_group_name = EXCLUDED.ad_group_name,
-            keyword_text = EXCLUDED.keyword_text,
-            match_type = EXCLUDED.match_type,
-            impressions = EXCLUDED.impressions,
-            clicks = EXCLUDED.clicks,
-            cost = EXCLUDED.cost,
-            attributed_sales_14d = EXCLUDED.attributed_sales_14d,
-            attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
-            cpc = EXCLUDED.cpc,
-            ctr = EXCLUDED.ctr,
-            acos = EXCLUDED.acos,
-            roas = EXCLUDED.roas,
-            run_id = EXCLUDED.run_id,
-            pulled_at = now()
-        RETURNING xmax = 0 AS inserted_flag
-    """)
-
-    cur = start
-    while cur <= end:
-        chunk_start = cur
-        chunk_end = min(end, cur + _dt.timedelta(days=max(1, chunk_days) - 1))
-        _bf_set(current_chunk=f"{chunk_start} -> {chunk_end}", last_event="creating KW report")
-
-        create_body = {
-            "name": f"spKeywords_{_ymd(chunk_start)}_{_ymd(chunk_end)}",
-            "startDate": _ymd(chunk_start),
-            "endDate": _ymd(chunk_end),
-            "configuration": {
-                "adProduct": "SPONSORED_PRODUCTS",
-                "reportTypeId": "spKeywords",
-                "timeUnit": "DAILY",
-                "groupBy": ["adGroup"],
-                "columns": [
-                    "date",
-                    "campaignId","campaignName",
-                    "adGroupId","adGroupName",
-                    "keywordId","keywordText","matchType",
-                    "impressions","clicks","cost",
-                    "attributedSales14d","attributedConversions14d"
-                ],
-                "format": "GZIP_JSON"
-            }
-        }
-
-        # Create report (handle duplicate 425)
-        with httpx.Client(timeout=60) as client:
-            cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
-            if 200 <= cr.status_code < 300:
-                report_id = cr.json().get("reportId")
-            elif cr.status_code == 425:
-                import re
-                m = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail",""))
-                report_id = m.group(1) if m else None
-            else:
-                BACKFILL_STATUS["kw"]["errors"] += 1
-                _bf_set(last_error=f"KW create {cr.status_code}: {cr.text}")
-                raise HTTPException(status_code=502, detail={"stage":"kw_create","status":cr.status_code,"body":cr.text})
-
+        # Request report from Amazon
+        report_id = _create_kw_report(cur, chunk_end)
         if not report_id:
             BACKFILL_STATUS["kw"]["errors"] += 1
-            _bf_set(last_error="KW create: missing reportId")
-            raise HTTPException(status_code=502, detail="KW create: missing reportId")
+            _bf_set(last_error="KW report creation failed")
+            break
 
         _bf_set(last_event=f"KW report created: {report_id}")
 
-        # Poll for success
-        status_url = f"{ads_base}/reporting/reports/{report_id}"
-        deadline = time.time() + int(wait_seconds)
-        download_url = None
-
-        with httpx.Client(timeout=60) as client:
-            while time.time() < deadline:
-                sr = client.get(status_url, headers=headers)
-                if sr.status_code >= 400:
-                    BACKFILL_STATUS["kw"]["errors"] += 1
-                    _bf_set(last_error=f"KW poll {sr.status_code}: {sr.text}")
-                    raise HTTPException(status_code=502, detail={"stage":"kw_poll","status":sr.status_code,"body":sr.text})
-                meta = sr.json()
-                st = meta.get("status")
-                if st in ("SUCCESS","COMPLETED") and meta.get("url"):
-                    download_url = meta["url"]
-                    break
-                if st in {"FAILURE","CANCELLED"}:
-                    BACKFILL_STATUS["kw"]["errors"] += 1
-                    _bf_set(last_error=f"KW status={st}: {meta}")
-                    raise HTTPException(status_code=502, detail={"stage":"kw_poll","status":st,"body":meta})
-                time.sleep(3)
-
+        # Poll for report ready
+        download_url = _wait_for_report_ready(report_id, wait_seconds)
         if not download_url:
             BACKFILL_STATUS["kw"]["errors"] += 1
             _bf_set(last_error="KW timeout waiting for report")
-            raise HTTPException(status_code=504, detail="KW timeout waiting for report")
+            break
 
         _bf_set(last_event=f"KW report ready: {report_id}, downloading")
 
@@ -2179,9 +2085,9 @@ def _run_kw_backfill(start: "_dt.date", end: "_dt.date", chunk_days: int, wait_s
             if dr.status_code >= 400:
                 BACKFILL_STATUS["kw"]["errors"] += 1
                 _bf_set(last_error=f"KW download {dr.status_code}: {dr.text[:300]}")
-                raise HTTPException(status_code=502, detail={"stage":"kw_download","status":dr.status_code,"body":dr.text})
+                break
 
-        # Gunzip / parse NDJSON
+        # Gunzip / parse NDJSON (or fallback to plain text)
         try:
             buf = io.BytesIO(dr.content)
             with gzip.GzipFile(fileobj=buf) as gz:
@@ -2189,61 +2095,154 @@ def _run_kw_backfill(start: "_dt.date", end: "_dt.date", chunk_days: int, wait_s
         except OSError:
             raw_text = dr.content.decode("utf-8", errors="ignore")
 
-        records = []
-        for line in raw_text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        # Iterator to handle NDJSON or JSON array/dict payloads
+        def _iter_kw_records(text: str):
+            nd = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    nd.append(_json.loads(line))
+                except Exception:
+                    nd = []
+                    break
+            if nd:
+                for rec in nd:
+                    yield rec
+                return
             try:
-                records.append(_json.loads(line))
+                obj = _json.loads(text)
             except Exception:
-                pass
+                return
+            if isinstance(obj, list):
+                for item in obj:
+                    yield item
+            elif isinstance(obj, dict):
+                yield obj
 
-        _bf_set(last_event=f"KW parsed {len(records)} records")
-
-        # Upsert
         run_id = str(uuid.uuid4())
-        processed = inserted = updated = 0
-        with engine.begin() as conn:
-            for obj in records:
-                d = {
-                    "profile_id": pid,
-                    "date": (obj.get("date") or obj.get("reportDate") or "")[:10],
-                    "campaign_id": str(obj.get("campaignId") or ""),
-                    "campaign_name": obj.get("campaignName") or "",
-                    "ad_group_id": str(obj.get("adGroupId") or ""),
-                    "ad_group_name": obj.get("adGroupName") or "",
-                    "keyword_id": str(obj.get("keywordId") or "0"),
-                    "keyword_text": obj.get("keywordText") or "",
-                    "match_type": obj.get("matchType") or "",
-                    "impressions": int(obj.get("impressions") or 0),
-                    "clicks": int(obj.get("clicks") or 0),
-                    "cost": float(obj.get("cost") or 0.0),
-                    "sales": float(obj.get("attributedSales14d") or 0.0),
-                    "orders": int(obj.get("attributedConversions14d") or 0),
-                }
-                if not d["date"]:
+        rows = []
+        parsed = 0
+
+        for rec in _iter_kw_records(raw_text):
+            items = rec if isinstance(rec, list) else [rec]
+            for obj in items:
+                if not isinstance(obj, dict):
                     continue
 
-                d["cpc"]  = round(d["cost"] / d["clicks"], 6) if d["clicks"] else 0.0
-                d["ctr"]  = round(d["clicks"] / d["impressions"], 6) if d["impressions"] else 0.0
-                d["acos"] = round(d["cost"] / d["sales"], 6) if d["sales"] else 0.0
-                d["roas"] = round(d["sales"] / d["cost"], 6) if d["cost"] else 0.0
-                d["run_id"] = run_id
+                date_str = (obj.get("date") or obj.get("reportDate") or "")[:10]
+                if not date_str:
+                    continue
 
-                res = conn.execute(upsert_sql, d).first()
-                if res and res[0] is True:
-                    inserted += 1
-                else:
-                    updated += 1
-                processed += 1
+                impressions = int(obj.get("impressions") or 0)
+                clicks      = int(obj.get("clicks") or 0)
+                cost        = float(obj.get("cost") or obj.get("spend") or 0.0)
 
-        BACKFILL_STATUS["kw"]["processed"] += processed
-        BACKFILL_STATUS["kw"]["inserted"]  += inserted
-        BACKFILL_STATUS["kw"]["updated"]   += updated
-        _bf_set(last_event=f"KW upsert done: proc={processed}, ins={inserted}, upd={updated}")
+                sales = obj.get("attributedSales14d") or obj.get("sales14d") or 0.0
+                sales = float(sales)
 
-        cur = chunk_end + _dt.timedelta(days=1)
+                orders = obj.get("attributedConversions14d") or obj.get("purchases14d") or 0
+                orders = int(orders)
+
+                campaign_id   = str(obj.get("campaignId") or "")
+                campaign_name = obj.get("campaignName") or ""
+                ad_group_id   = str(obj.get("adGroupId") or "")
+                ad_group_name = obj.get("adGroupName") or ""
+                keyword_id    = str(obj.get("keywordId") or "0")
+                keyword_text  = obj.get("keywordText") or obj.get("keyword") or ""
+                match_type    = obj.get("matchType") or ""
+
+                cpc  = round(cost / clicks, 6) if clicks else 0.0
+                ctr  = round(clicks / impressions, 6) if impressions else 0.0
+                acos = round(cost / sales, 6) if sales else 0.0
+                roas = round(sales / cost, 6) if cost else 0.0
+
+                rows.append({
+                    "profile_id": pid,
+                    "date": date_str,
+                    "keyword_id": keyword_id,
+                    "campaign_id": campaign_id,
+                    "campaign_name": campaign_name,
+                    "ad_group_id": ad_group_id,
+                    "ad_group_name": ad_group_name,
+                    "keyword_text": keyword_text,
+                    "match_type": match_type,
+                    "impressions": impressions,
+                    "clicks": clicks,
+                    "cost": cost,
+                    "attributed_sales_14d": sales,
+                    "attributed_conversions_14d": orders,
+                    "cpc": cpc, "ctr": ctr, "acos": acos, "roas": roas,
+                    "run_id": run_id,
+                })
+                parsed += 1
+
+        _bf_set(last_event=f"KW parsed {parsed} records")
+
+        # Upsert to DB
+        if rows and engine:
+            upsert_sql = text("""
+                INSERT INTO fact_sp_keyword_daily (
+                    profile_id, date, keyword_id,
+                    campaign_id, campaign_name, ad_group_id, ad_group_name,
+                    keyword_text, match_type,
+                    impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
+                    cpc, ctr, acos, roas,
+                    run_id, pulled_at
+                )
+                VALUES (
+                    :profile_id, :date, :keyword_id,
+                    :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+                    :keyword_text, :match_type,
+                    :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
+                    :cpc, :ctr, :acos, :roas,
+                    :run_id, now()
+                )
+                ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
+                    campaign_id = EXCLUDED.campaign_id,
+                    campaign_name = EXCLUDED.campaign_name,
+                    ad_group_id = EXCLUDED.ad_group_id,
+                    ad_group_name = EXCLUDED.ad_group_name,
+                    keyword_text = EXCLUDED.keyword_text,
+                    match_type = EXCLUDED.match_type,
+                    impressions = EXCLUDED.impressions,
+                    clicks = EXCLUDED.clicks,
+                    cost = EXCLUDED.cost,
+                    attributed_sales_14d = EXCLUDED.attributed_sales_14d,
+                    attributed_conversions_14d = EXCLUDED.attributed_conversions_14d,
+                    cpc = EXCLUDED.cpc,
+                    ctr = EXCLUDED.ctr,
+                    acos = EXCLUDED.acos,
+                    roas = EXCLUDED.roas,
+                    run_id = EXCLUDED.run_id,
+                    pulled_at = now()
+                RETURNING xmax = 0 AS inserted_flag
+            """)
+
+            inserted = updated = 0
+            with engine.begin() as conn:
+                for i in range(0, len(rows), 1000):
+                    batch = rows[i:i+1000]
+                    res = conn.execute(upsert_sql, batch).fetchall()
+                    for r in res:
+                        if r[0] is True:
+                            inserted += 1
+                        else:
+                            updated += 1
+
+            BACKFILL_STATUS["kw"]["inserted"] += inserted
+            BACKFILL_STATUS["kw"]["updated"] += updated
+            _bf_set(last_event=f"KW upserted: {inserted} inserted, {updated} updated")
+
+        else:
+            _bf_set(last_event="KW parsed 0 records (nothing to upsert)")
+
+        BACKFILL_STATUS["kw"]["processed"] += parsed
+        cur = chunk_end + timedelta(days=1)
+
+    BACKFILL_STATUS["active"] = False
+    BACKFILL_STATUS["finished_at"] = datetime.utcnow().isoformat()
 
 # ====== DAILY INGEST (yesterday) ======
 @app.post("/api/tasks/daily_ingest")
