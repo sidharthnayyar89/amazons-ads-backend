@@ -2189,3 +2189,26 @@ def test_bg(background_tasks: BackgroundTasks):
         print("[bgtest] finished", flush=True)
     background_tasks.add_task(_job)
     return {"status": "QUEUED"}
+
+# ---- Backfill live status (simple in-memory tracker) ----
+BACKFILL_STATUS = {
+    "active": False,
+    "mode": None,            # "backfill" | "daily" | "test"
+    "started_at": None,
+    "finished_at": None,
+    "current_chunk": None,   # "YYYY-MM-DD -> YYYY-MM-DD"
+    "last_event": None,
+    "kw": {"processed": 0, "inserted": 0, "updated": 0, "errors": 0},
+    "st": {"processed": 0, "inserted": 0, "updated": 0, "errors": 0},
+    "last_error": None,
+}
+
+def _bf_set(**k):
+    BACKFILL_STATUS.update(k)
+    # also mirror into logs so you can watch Render logs
+    print(f"[backfill] {k}", flush=True)
+
+@app.get("/api/debug/backfill_status")
+def backfill_status():
+    return BACKFILL_STATUS
+
