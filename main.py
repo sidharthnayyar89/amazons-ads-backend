@@ -2149,7 +2149,7 @@ def debug_coverage():
     }
 
 # Backfill any date range (runs both KW + ST) in background
-@app.post("/api/tasks/backfill_range")
+@app.api_route("/api/tasks/backfill_range", methods=["GET", "POST"])
 def backfill_range(background_tasks: BackgroundTasks, start: str, end: str, chunk: int = 7, key: str = ""):
     # reuse the same shared key as daily_ingest (optional auth)
     if DAILY_INGEST_KEY:
