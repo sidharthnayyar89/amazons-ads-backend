@@ -2180,3 +2180,12 @@ def backfill_range(background_tasks: BackgroundTasks, start: str, end: str, chun
     background_tasks.add_task(_job)
     return {"status":"QUEUED","start":start,"end":end,"chunk_days":chunk,"wait_seconds":BACKFILL_WAIT_SECS}
 
+@app.api_route("/api/debug/test_bg", methods=["GET","POST"])
+def test_bg(background_tasks: BackgroundTasks):
+    def _job():
+        import time
+        print("[bgtest] started", flush=True)
+        time.sleep(5)
+        print("[bgtest] finished", flush=True)
+    background_tasks.add_task(_job)
+    return {"status": "QUEUED"}
