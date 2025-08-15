@@ -2119,3 +2119,31 @@ def daily_ingest(background_tasks: BackgroundTasks, key: str = "", date: str | N
         "jobs": ["keywords", "search_terms"]
     }
 
+@app.get("/api/debug/coverage")
+def debug_coverage():
+    if not engine:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    pid = _env("AMZN_PROFILE_ID")
+    with engine.begin() as conn:
+        kw = conn.execute(text("""
+            SELECT MIN(date) AS min_date, MAX(date) AS max_date, COUNT(*) AS total
+            FROM fact_sp_keyword_daily
+            WHERE profile_id = :pid
+        """), {"pid": pid}).mappings().first()
+        st = conn.execute(text("""
+            SELECT MIN(date) AS min_date, MAX(date) AS max_date, COUNT(*) AS total
+            FROM fact_sp_search_term_daily
+            WHERE profile_id = :pid
+        """), {"pid": pid}).mappings().first()
+    return {
+        "keywords": {
+            "min_date": kw["min_date"].isoformat() if kw["min_date"] else None,
+            "max_date": kw["max_date"].isoformat() if kw["max_date"] else None,
+            "rows": int(kw["total"] or 0),
+        },
+        "search_terms": {
+            "min_date": st["min_date"].isoformat() if st["min_date"] else None,
+            "max_date": st["max_date"].isoformat() if st["max_date"] else None,
+            "rows": int(st["total"] or 0),
+        }
+    }
