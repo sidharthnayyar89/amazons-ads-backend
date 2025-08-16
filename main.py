@@ -2106,7 +2106,13 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
         }
 
         with httpx.Client(timeout=60) as client:
-            cr = client.post(f"{ads_base}/reporting/reports", headers=headers, json=create_body)
+            cr = _ads_request_with_refresh(
+                client,
+                "POST",
+                f"{ads_base}/reporting/reports",
+                headers=headers,
+                json=create_body,
+            )
         if 200 <= cr.status_code < 300:
             report_id = cr.json().get("reportId")
         elif cr.status_code == 425:
@@ -2130,24 +2136,20 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
         deadline = time.time() + wait_seconds
         download_url = None
 
-        with httpx.Client(timeout=60) as client:
-            while time.time() < deadline:
-                sr = client.get(status_url, headers=headers)
-                if sr.status_code >= 400:
-                    BACKFILL_STATUS["kw"]["errors"] += 1
-                    _bf_set(last_error=f"KW status {sr.status_code}: {sr.text[:300]}")
-                    return
-                meta = sr.json()
-                st = meta.get("status")
-                if st in ("SUCCESS", "COMPLETED") and meta.get("url"):
-                    download_url = meta["url"]
-                    break
-                if st in {"FAILURE", "CANCELLED"}:
-                    BACKFILL_STATUS["kw"]["errors"] += 1
-                    _bf_set(last_error=f"KW failed: {meta}")
-                    return
-                time.sleep(3)
+        while time.time() < deadline:
+            sr = _ads_request_with_refresh("GET", status_url, headers=headers)
+            if sr.status_code >= 400:
+                BACKFILL_STATUS["kw"]["errors"] += 1
+                _bf_set(last_error=f"KW status {sr.status_code}: {sr.text[:300]}")
+                raise HTTPException(status_code=sr.status_code, detail={"stage": "kw_status", "body": sr.text})
 
+            status_payload = sr.json()
+            report_status = status_payload.get("status")
+            if report_status in ("SUCCESS", "FAILURE", "CANCELLED"):
+                break
+
+            time.sleep(5)
+                
         if not download_url:
             BACKFILL_STATUS["kw"]["errors"] += 1
             _bf_set(last_error="KW timeout waiting for report")
@@ -2488,3 +2490,18 @@ def run_day_sync(date: str, key: str = ""):
     finally:
         import datetime as _dt
         _bf_set(active=False, finished_at=_dt.datetime.utcnow().isoformat())
+
+def _ads_request_with_refresh(client: httpx.Client, method: str, url: str, *, headers: dict, **kwargs) -> httpx.Response:
+    """Call Ads API once; if 401, refresh LWA token and retry exactly once."""
+    r = client.request(method, url, headers=headers, **kwargs)
+    if r.status_code == 401:
+        # Refresh LWA token and retry
+        access = _get_access_token_from_refresh()
+        retry_headers = _ads_headers(access)
+        # Preserve any caller-provided Accept/Content-Type, etc.
+        for k, v in headers.items():
+            if k.lower() not in ("authorization", "amazon-advertising-api-scope", "amazon-advertising-api-clientid"):
+                retry_headers[k] = v
+        r = client.request(method, url, headers=retry_headers, **kwargs)
+    return r
+
