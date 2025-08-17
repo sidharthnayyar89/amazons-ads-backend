@@ -2493,17 +2493,17 @@ def run_day_sync(date: str, key: str = ""):
         import datetime as _dt
         _bf_set(active=False, finished_at=_dt.datetime.utcnow().isoformat())
 
-def _ads_request_with_refresh(client: httpx.Client, method: str, url: str, *, headers: dict, **kwargs) -> httpx.Response:
-    """Call Ads API once; if 401, refresh LWA token and retry exactly once."""
-    r = client.request(method, url, headers=headers, **kwargs)
-    if r.status_code == 401:
-        # Refresh LWA token and retry
-        access = _get_access_token_from_refresh()
-        retry_headers = _ads_headers(access)
-        # Preserve any caller-provided Accept/Content-Type, etc.
-        for k, v in headers.items():
-            if k.lower() not in ("authorization", "amazon-advertising-api-scope", "amazon-advertising-api-clientid"):
-                retry_headers[k] = v
-        r = client.request(method, url, headers=retry_headers, **kwargs)
-    return r
-
+def _ads_request_with_refresh(method: str, url: str, headers: dict, json: dict | None = None, timeout: int = 60):
+    """
+    Make an Amazon Ads API request. If the access token is expired,
+    refresh it once and retry automatically.
+    """
+    with httpx.Client(timeout=timeout) as client:
+        r = client.request(method, url, headers=headers, json=json)
+        if r.status_code == 401:
+            # Refresh once
+            access = _get_access_token_from_refresh()
+            new_headers = _ads_headers(access)
+            r = client.request(method, url, headers=new_headers, json=json)
+        r.raise_for_status()
+        return r
