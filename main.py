@@ -1802,109 +1802,119 @@ import time, io, gzip, uuid, json as _json
 import httpx
 from sqlalchemy import text as _text
 
-def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None = None):
-    """Backfill SP Search Term daily data in chunks. Polls up to `wait_seconds` for each chunk's report."""
+def _run_st_backfill(start: _dt.date, end: _dt.date, chunk_days: int, wait_seconds: int | None = None):
+    """Backfill Sponsored Products SEARCH TERM data for [start, end] in chunks."""
     if wait_seconds is None:
         wait_seconds = BACKFILL_WAIT_SECS
 
-    pid = _env("AMZN_PROFILE_ID")
-    region = os.environ.get("AMZN_REGION", "NA").upper()
-    ads_base = _ads_base(region)
+    _bf_set(last_event="ST backfill starting")
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
+    region  = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+    pid = _env("AMZN_PROFILE_ID")
 
-    def _ymd(d): return d.strftime("%Y-%m-%d")
+    st_columns = [
+        "date",
+        "campaignId","campaignName",
+        "adGroupId","adGroupName",
+        "searchTerm","keywordId","keyword","matchType",
+        "impressions","clicks","spend",
+        "sales14d","purchases14d",
+        "clickThroughRate","costPerClick",
+        "acosClicks14d","roasClicks14d",
+    ]
 
-    _bf_set(active=True, mode="backfill", started_at=datetime.now(timezone.utc).isoformat(),
-            finished_at=None, last_error=None)
+    def _iter_records(text: str):
+        """Yield JSON records whether NDJSON or a JSON array/object."""
+        got = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                got.append(_json.loads(line))
+            except Exception:
+                got = []
+                break
+        if got:
+            for r in got:
+                yield r
+            return
+        try:
+            obj = _json.loads(text)
+        except Exception:
+            return
+        if isinstance(obj, list):
+            for item in obj:
+                yield item
+        elif isinstance(obj, dict):
+            yield obj
 
     cur = start
     while cur <= end:
-        chunk_end = min(cur + timedelta(days=chunk_days - 1), end)
-        _bf_set(current_chunk=f"{_ymd(cur)} -> {_ymd(chunk_end)}", last_event="creating ST report")
+        chunk_end = min(cur + _dt.timedelta(days=chunk_days - 1), end)
+        BACKFILL_STATUS["current_chunk"] = f"{cur.isoformat()} -> {chunk_end.isoformat()}"
 
-        # Create report (use allowed names: sales14d / purchases14d)
+        # 1) create report
         create_body = {
-            "name": f"spSearchTerm_{_ymd(cur)}_{_ymd(chunk_end)}",
-            "startDate": _ymd(cur),
-            "endDate": _ymd(chunk_end),
+            "name": f"ST {cur}..{chunk_end}",
+            "startDate": cur.isoformat(),
+            "endDate": chunk_end.isoformat(),
             "configuration": {
-                "adProduct": "SPONSORED_PRODUCTS",
-                "reportTypeId": "spSearchTerm",
-                "timeUnit": "DAILY",
-                "groupBy": ["searchTerm"],
-                "columns": [
-                    "date",
-                    "campaignId","campaignName",
-                    "adGroupId","adGroupName",
-                    "searchTerm","matchType",
-                    "impressions","clicks","cost",
-                    "sales14d","purchases14d"
-                ],
-                "format": "GZIP_JSON"
+                "entity": "SEARCH_TERM",
+                "groupBy": ["DAY"],
+                "columns": st_columns,
+                "timeUnit": "DAILY"
             }
         }
-
-        with httpx.Client(timeout=60) as client:
-            cr = _ads_request_with_refresh(
-                client,
-                "POST",
-                f"{ads_base}/reporting/reports",
-                headers=headers,
-                json=create_body,
-            )
-        if 200 <= cr.status_code < 300:
-            report_id = cr.json().get("reportId")
-        elif cr.status_code == 425:
-            try:
-                import re
-                report_id = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail", "")).group(1)
-            except Exception:
-                BACKFILL_STATUS["st"]["errors"] += 1
-                _bf_set(last_error=f"ST duplicate create but no id: {cr.text[:300]}")
-                return
-        else:
+        _bf_set(last_event="creating ST report")
+        r = _ads_request_with_refresh(
+            "POST",
+            f"{ads_base}/reporting/reports",
+            headers=headers,
+            json=create_body,
+        )
+        if r.status_code >= 400:
             BACKFILL_STATUS["st"]["errors"] += 1
-            _bf_set(last_error=f"ST create {cr.status_code}: {cr.text[:300]}")
-            return
-
+            _bf_set(last_error=f"ST create {r.status_code}: {r.text[:300]}")
+            raise HTTPException(status_code=502, detail={"stage":"st_create","status":r.status_code,"body":r.text})
+        report_id = r.json().get("reportId")
         _bf_set(last_event=f"ST report created: {report_id}")
 
-        # Poll for completion
+        # 2) poll
         status_url = f"{ads_base}/reporting/reports/{report_id}"
         deadline = time.time() + wait_seconds
         download_url = None
-
         while time.time() < deadline:
             sr = _ads_request_with_refresh("GET", status_url, headers=headers)
             if sr.status_code >= 400:
-                BACKFILL_STATUS["kw"]["errors"] += 1
-                _bf_set(last_error=f"KW status {sr.status_code}: {sr.text[:300]}")
-                raise HTTPException(status_code=sr.status_code, detail={"stage": "kw_status", "body": sr.text})
-
-            status_payload = sr.json()
-            report_status = status_payload.get("status")
-            if report_status in ("SUCCESS", "FAILURE", "CANCELLED"):
+                BACKFILL_STATUS["st"]["errors"] += 1
+                _bf_set(last_error=f"ST status {sr.status_code}: {sr.text[:300]}")
+                raise HTTPException(status_code=502, detail={"stage":"st_status","status":sr.status_code,"body":sr.text})
+            meta = sr.json()
+            st = meta.get("status")
+            if st in ("SUCCESS", "COMPLETED") and meta.get("url"):
+                download_url = meta["url"]
                 break
-            
             time.sleep(5)
-                
+
         if not download_url:
             BACKFILL_STATUS["st"]["errors"] += 1
             _bf_set(last_error="ST timeout waiting for report")
-            return
+            raise HTTPException(status_code=504, detail="ST timeout waiting for report")
 
         _bf_set(last_event=f"ST report ready: {report_id}, downloading")
 
-        # Download
+        # 3) download
         with httpx.Client(timeout=120) as client:
             dr = client.get(download_url, headers={})
             if dr.status_code >= 400:
                 BACKFILL_STATUS["st"]["errors"] += 1
                 _bf_set(last_error=f"ST download {dr.status_code}: {dr.text[:300]}")
-                return
+                raise HTTPException(status_code=502, detail={"stage":"st_download","status":dr.status_code,"body":dr.text})
 
-        # Decompress
+        # 4) gunzip / parse
         try:
             buf = io.BytesIO(dr.content)
             with gzip.GzipFile(fileobj=buf) as gz:
@@ -1912,41 +1922,16 @@ def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
         except OSError:
             raw_text = dr.content.decode("utf-8", errors="ignore")
 
-        # Iterate records
-        def _iter_st_records(text: str):
-            nd = []
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    nd.append(_json.loads(line))
-                except Exception:
-                    nd = []
-                    break
-            if nd:
-                for rec in nd:
-                    yield rec
-                return
-            try:
-                obj = _json.loads(text)
-            except Exception:
-                return
-            if isinstance(obj, list):
-                for item in obj:
-                    yield item
-            elif isinstance(obj, dict):
-                yield obj
-
         run_id = str(uuid.uuid4())
         rows = []
         parsed = 0
 
-        for rec in _iter_st_records(raw_text):
+        for rec in _iter_records(raw_text):
             items = rec if isinstance(rec, list) else [rec]
             for obj in items:
                 if not isinstance(obj, dict):
                     continue
+                parsed += 1
 
                 ds = (obj.get("date") or obj.get("reportDate") or "")[:10]
                 if not ds:
@@ -1954,15 +1939,9 @@ def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
 
                 impressions = int(obj.get("impressions") or 0)
                 clicks = int(obj.get("clicks") or 0)
-                cost = float(obj.get("cost") or 0.0)
-
-                # Accept either sales14d/purchases14d or attributedSales14d/attributedConversions14d
-                sales = float(
-                    (obj.get("sales14d") if obj.get("sales14d") is not None else obj.get("attributedSales14d")) or 0.0
-                )
-                orders = int(
-                    (obj.get("purchases14d") if obj.get("purchases14d") is not None else obj.get("attributedConversions14d")) or 0
-                )
+                cost = float(obj.get("spend") or obj.get("cost") or 0.0)
+                sales = float(obj.get("sales14d") or 0.0)
+                orders = int(obj.get("purchases14d") or 0)
 
                 cpc  = round(cost / clicks, 6) if clicks else 0.0
                 ctr  = round(clicks / impressions, 6) if impressions else 0.0
@@ -1970,41 +1949,44 @@ def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                 roas = round(sales / cost, 6) if cost else 0.0
 
                 rows.append({
-                    "profile_id": pid, "date": ds,
-                    "campaign_id": str(obj.get("campaignId") or ""),
+                    "profile_id": pid,
+                    "date": ds,
+                    "campaign_id": str(obj.get("campaignId") or "") or "",
                     "campaign_name": obj.get("campaignName") or "",
-                    "ad_group_id": str(obj.get("adGroupId") or ""),
+                    "ad_group_id": str(obj.get("adGroupId") or "") or "",
                     "ad_group_name": obj.get("adGroupName") or "",
                     "search_term": obj.get("searchTerm") or "",
                     "keyword_id": (str(obj.get("keywordId") or "") or None),
-                    "keyword_text": obj.get("keywordText") or None,
+                    "keyword_text": obj.get("keyword") or None,
                     "match_type": obj.get("matchType") or "",
-                    "impressions": impressions, "clicks": clicks, "cost": cost,
-                    "attributed_sales_14d": sales, "attributed_conversions_14d": orders,
+                    "impressions": impressions,
+                    "clicks": clicks,
+                    "cost": cost,
+                    "attributed_sales_14d": sales,
+                    "attributed_conversions_14d": orders,
                     "cpc": cpc, "ctr": ctr, "acos": acos, "roas": roas,
                     "run_id": run_id,
                 })
-                parsed += 1
 
-        _bf_set(last_event=f"ST parsed {parsed} records")
-
+        BACKFILL_STATUS["st"]["processed"] += parsed
         if rows:
+            _bf_set(last_event=f"ST parsed {len(rows)} records")
+
             upsert_sql = _text("""
                 INSERT INTO fact_sp_search_term_daily (
                     profile_id, date,
-                    campaign_id, campaign_name, ad_group_id, ad_group_name,
+                    campaign_id, campaign_name,
+                    ad_group_id, ad_group_name,
                     search_term, keyword_id, keyword_text, match_type,
                     impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
-                    cpc, ctr, acos, roas,
-                    run_id, pulled_at
-                )
-                VALUES (
+                    cpc, ctr, acos, roas, run_id, pulled_at
+                ) VALUES (
                     :profile_id, :date,
-                    :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
+                    :campaign_id, :campaign_name,
+                    :ad_group_id, :ad_group_name,
                     :search_term, :keyword_id, :keyword_text, :match_type,
                     :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
-                    :cpc, :ctr, :acos, :roas,
-                    :run_id, now()
+                    :cpc, :ctr, :acos, :roas, :run_id, now()
                 )
                 ON CONFLICT (profile_id, date, ad_group_id, search_term, match_type) DO UPDATE SET
                     campaign_id = EXCLUDED.campaign_id,
@@ -2025,23 +2007,18 @@ def _run_st_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                     roas = EXCLUDED.roas,
                     run_id = EXCLUDED.run_id,
                     pulled_at = now()
-                RETURNING xmax = 0 AS inserted_flag
             """)
 
-    # --- Upsert (no RETURNING; don't call fetchall) ---
-    if rows:
-        with engine.begin() as conn:
-            for i in range(0, len(rows), 1000):
-                batch = rows[i:i+1000]
-                conn.execute(upsert_sql, batch)
+            with engine.begin() as conn:
+                for i in range(0, len(rows), 1000):
+                    conn.execute(upsert_sql, rows[i:i+1000])
 
-        total_upserted = len(rows)
-        BACKFILL_STATUS["st"]["processed"] += total_upserted
-        _bf_set(last_event=f"ST upserted {total_upserted} rows (insert/update split not tracked)")
-    else:
-        _bf_set(last_event="ST parsed 0 records (nothing to upsert)")
+            total_upserted = len(rows)
+            _bf_set(last_event=f"ST upserted {total_upserted} rows (insert/update split not tracked)")
+        else:
+            _bf_set(last_event="ST parsed 0 records (nothing to upsert)")
 
-    cur = chunk_end + timedelta(days=1)
+        cur = chunk_end + _dt.timedelta(days=1)
 
     BACKFILL_STATUS["active"] = False
     BACKFILL_STATUS["finished_at"] = _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
@@ -2063,111 +2040,134 @@ import time, io, gzip, uuid, json as _json
 import httpx
 from sqlalchemy import text as _text
 
-def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None = None):
-    """Backfill SP Keyword daily data in chunks. Polls up to `wait_seconds` for each chunk's report."""
+def _run_kw_backfill(start: _dt.date, end: _dt.date, chunk_days: int, wait_seconds: int | None = None):
+    """Backfill Sponsored Products KEYWORD data for [start, end] in chunks."""
     if wait_seconds is None:
         wait_seconds = BACKFILL_WAIT_SECS
 
-    pid = _env("AMZN_PROFILE_ID")
-    region = os.environ.get("AMZN_REGION", "NA").upper()
-    ads_base = _ads_base(region)
+    # Mark job start
+    BACKFILL_STATUS.update({
+        "active": True,
+        "mode": "backfill",
+        "started_at": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(),
+        "finished_at": None,
+        "current_chunk": None,
+        "last_event": None,
+        "last_error": None,
+        "kw": {"processed": 0, "inserted": 0, "updated": 0, "errors": 0},
+    })
+    _bf_set(last_event="KW backfill starting")
+
     access = _get_access_token_from_refresh()
     headers = _ads_headers(access)
+    region  = os.environ.get("AMZN_REGION", "NA").upper()
+    ads_base = _ads_base(region)
+    pid = _env("AMZN_PROFILE_ID")
 
-    def _ymd(d): return d.strftime("%Y-%m-%d")
+    # columns allowed by SP reporting (v3)
+    columns = [
+        "date",
+        "campaignId","campaignName",
+        "adGroupId","adGroupName",
+        "keywordId","keyword","matchType",
+        "impressions","clicks","spend",
+        "sales14d","purchases14d",
+        "clickThroughRate","costPerClick",
+        "acosClicks14d","roasClicks14d",
+    ]
 
-    _bf_set(active=True, mode="backfill", started_at=datetime.now(timezone.utc).isoformat(),
-            finished_at=None, last_error=None)
+    def _iter_records(text: str):
+        """Yield JSON records whether NDJSON or a JSON array/object."""
+        # try NDJSON
+        got = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                got.append(_json.loads(line))
+            except Exception:
+                got = []
+                break
+        if got:
+            for r in got:
+                yield r
+            return
+        # try whole JSON
+        try:
+            obj = _json.loads(text)
+        except Exception:
+            return
+        if isinstance(obj, list):
+            for item in obj:
+                yield item
+        elif isinstance(obj, dict):
+            yield obj
 
     cur = start
     while cur <= end:
-        chunk_end = min(cur + timedelta(days=chunk_days - 1), end)
-        _bf_set(current_chunk=f"{_ymd(cur)} -> {_ymd(chunk_end)}", last_event="creating KW report")
+        chunk_end = min(cur + _dt.timedelta(days=chunk_days - 1), end)
+        BACKFILL_STATUS["current_chunk"] = f"{cur.isoformat()} -> {chunk_end.isoformat()}"
 
-        # Create report (includes date column)
+        # 1) create report
         create_body = {
-            "name": f"spKeywords_{_ymd(cur)}_{_ymd(chunk_end)}",
-            "startDate": _ymd(cur),
-            "endDate": _ymd(chunk_end),
+            "name": f"KW {cur}..{chunk_end}",
+            "startDate": cur.isoformat(),
+            "endDate": chunk_end.isoformat(),
             "configuration": {
-                "adProduct": "SPONSORED_PRODUCTS",
-                "reportTypeId": "spKeywords",
-                "timeUnit": "DAILY",
-                "groupBy": ["adGroup"],
-                "columns": [
-                    "date",
-                    "campaignId","campaignName",
-                    "adGroupId","adGroupName",
-                    "keywordId","keywordText","matchType",
-                    "impressions","clicks","cost",
-                    # Most accounts support these names for KW:
-                    "attributedSales14d","attributedConversions14d"
-                ],
-                "format": "GZIP_JSON"
+                "entity": "KEYWORD",
+                "groupBy": ["DAY"],
+                "columns": columns,
+                "timeUnit": "DAILY"
             }
         }
-
-        with httpx.Client(timeout=60) as client:
-            cr = _ads_request_with_refresh(
-                client,
-                "POST",
-                f"{ads_base}/reporting/reports",
-                headers=headers,
-                json=create_body,
-            )
-        if 200 <= cr.status_code < 300:
-            report_id = cr.json().get("reportId")
-        elif cr.status_code == 425:
-            # duplicate create: pull reportId out of detail
-            try:
-                import re
-                report_id = re.search(r"([0-9a-fA-F-]{36})", cr.json().get("detail", "")).group(1)
-            except Exception:
-                BACKFILL_STATUS["kw"]["errors"] += 1
-                _bf_set(last_error=f"KW duplicate create but no id: {cr.text[:300]}")
-                return
-        else:
+        _bf_set(last_event="creating KW report")
+        r = _ads_request_with_refresh(
+            "POST",
+            f"{ads_base}/reporting/reports",
+            headers=headers,
+            json=create_body,
+        )
+        if r.status_code >= 400:
             BACKFILL_STATUS["kw"]["errors"] += 1
-            _bf_set(last_error=f"KW create {cr.status_code}: {cr.text[:300]}")
-            return
-
+            _bf_set(last_error=f"KW create {r.status_code}: {r.text[:300]}")
+            raise HTTPException(status_code=502, detail={"stage":"kw_create","status":r.status_code,"body":r.text})
+        report_id = r.json().get("reportId")
         _bf_set(last_event=f"KW report created: {report_id}")
 
-        # Poll for completion (up to wait_seconds)
+        # 2) poll for ready
         status_url = f"{ads_base}/reporting/reports/{report_id}"
         deadline = time.time() + wait_seconds
         download_url = None
-
         while time.time() < deadline:
             sr = _ads_request_with_refresh("GET", status_url, headers=headers)
             if sr.status_code >= 400:
                 BACKFILL_STATUS["kw"]["errors"] += 1
                 _bf_set(last_error=f"KW status {sr.status_code}: {sr.text[:300]}")
-                raise HTTPException(status_code=sr.status_code, detail={"stage": "kw_status", "body": sr.text})
-
-            status_payload = sr.json()
-            report_status = status_payload.get("status")
-            if report_status in ("SUCCESS", "FAILURE", "CANCELLED"):
+                raise HTTPException(status_code=502, detail={"stage":"kw_status","status":sr.status_code,"body":sr.text})
+            meta = sr.json()
+            st = meta.get("status")
+            if st in ("SUCCESS", "COMPLETED") and meta.get("url"):
+                download_url = meta["url"]
                 break
-
             time.sleep(5)
-                
+
         if not download_url:
             BACKFILL_STATUS["kw"]["errors"] += 1
             _bf_set(last_error="KW timeout waiting for report")
-            return
+            raise HTTPException(status_code=504, detail="KW timeout waiting for report")
 
         _bf_set(last_event=f"KW report ready: {report_id}, downloading")
 
-        # Download presigned S3 (no headers)
+        # 3) download (presigned S3 – no auth headers)
         with httpx.Client(timeout=120) as client:
             dr = client.get(download_url, headers={})
             if dr.status_code >= 400:
                 BACKFILL_STATUS["kw"]["errors"] += 1
                 _bf_set(last_error=f"KW download {dr.status_code}: {dr.text[:300]}")
-                return
+                raise HTTPException(status_code=502, detail={"stage":"kw_download","status":dr.status_code,"body":dr.text})
 
-        # Decompress
+        # 4) gunzip / parse
         try:
             buf = io.BytesIO(dr.content)
             with gzip.GzipFile(fileobj=buf) as gz:
@@ -2175,57 +2175,25 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
         except OSError:
             raw_text = dr.content.decode("utf-8", errors="ignore")
 
-        # Iterate records (NDJSON or JSON)
-        def _iter_kw_records(text: str):
-            nd = []
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    nd.append(_json.loads(line))
-                except Exception:
-                    nd = []
-                    break
-            if nd:
-                for rec in nd:
-                    yield rec
-                return
-            try:
-                obj = _json.loads(text)
-            except Exception:
-                return
-            if isinstance(obj, list):
-                for item in obj:
-                    yield item
-            elif isinstance(obj, dict):
-                yield obj
-
-        # Map & collect rows
         run_id = str(uuid.uuid4())
         rows = []
         parsed = 0
 
-        for rec in _iter_kw_records(raw_text):
+        for rec in _iter_records(raw_text):
             items = rec if isinstance(rec, list) else [rec]
             for obj in items:
                 if not isinstance(obj, dict):
                     continue
-
+                parsed += 1
                 ds = (obj.get("date") or obj.get("reportDate") or "")[:10]
                 if not ds:
                     continue
 
                 impressions = int(obj.get("impressions") or 0)
                 clicks = int(obj.get("clicks") or 0)
-                cost = float(obj.get("cost") or 0.0)
-                # Handle either attributedSales14d/attributedConversions14d or sales14d/purchases14d
-                sales = float(
-                    (obj.get("attributedSales14d") if obj.get("attributedSales14d") is not None else obj.get("sales14d")) or 0.0
-                )
-                orders = int(
-                    (obj.get("attributedConversions14d") if obj.get("attributedConversions14d") is not None else obj.get("purchases14d")) or 0
-                )
+                cost = float(obj.get("spend") or obj.get("cost") or 0.0)
+                sales = float(obj.get("sales14d") or 0.0)
+                orders = int(obj.get("purchases14d") or 0)
 
                 cpc  = round(cost / clicks, 6) if clicks else 0.0
                 ctr  = round(clicks / impressions, 6) if impressions else 0.0
@@ -2235,12 +2203,12 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                 rows.append({
                     "profile_id": pid,
                     "date": ds,
-                    "keyword_id": str(obj.get("keywordId") or "0"),
-                    "campaign_id": str(obj.get("campaignId") or ""),
+                    "campaign_id": str(obj.get("campaignId") or "") or "",
                     "campaign_name": obj.get("campaignName") or "",
-                    "ad_group_id": str(obj.get("adGroupId") or ""),
+                    "ad_group_id": str(obj.get("adGroupId") or "") or "",
                     "ad_group_name": obj.get("adGroupName") or "",
-                    "keyword_text": obj.get("keywordText") or "",
+                    "keyword_id": (str(obj.get("keywordId") or "") or None),
+                    "keyword_text": obj.get("keyword") or None,
                     "match_type": obj.get("matchType") or "",
                     "impressions": impressions,
                     "clicks": clicks,
@@ -2250,33 +2218,33 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                     "cpc": cpc, "ctr": ctr, "acos": acos, "roas": roas,
                     "run_id": run_id,
                 })
-                parsed += 1
 
-        _bf_set(last_event=f"KW parsed {parsed} records")
-
+        BACKFILL_STATUS["kw"]["processed"] += parsed
         if rows:
+            _bf_set(last_event=f"KW parsed {len(rows)} records")
+
             upsert_sql = _text("""
-                INSERT INTO fact_sp_keyword_daily (
-                    profile_id, date, keyword_id,
-                    campaign_id, campaign_name, ad_group_id, ad_group_name,
-                    keyword_text, match_type,
+                INSERT INTO fact_sp_keywords_daily (
+                    profile_id, date,
+                    campaign_id, campaign_name,
+                    ad_group_id, ad_group_name,
+                    keyword_id, keyword_text, match_type,
                     impressions, clicks, cost, attributed_sales_14d, attributed_conversions_14d,
-                    cpc, ctr, acos, roas,
-                    run_id, pulled_at
-                )
-                VALUES (
-                    :profile_id, :date, :keyword_id,
-                    :campaign_id, :campaign_name, :ad_group_id, :ad_group_name,
-                    :keyword_text, :match_type,
+                    cpc, ctr, acos, roas, run_id, pulled_at
+                ) VALUES (
+                    :profile_id, :date,
+                    :campaign_id, :campaign_name,
+                    :ad_group_id, :ad_group_name,
+                    :keyword_id, :keyword_text, :match_type,
                     :impressions, :clicks, :cost, :attributed_sales_14d, :attributed_conversions_14d,
-                    :cpc, :ctr, :acos, :roas,
-                    :run_id, now()
+                    :cpc, :ctr, :acos, :roas, :run_id, now()
                 )
-                ON CONFLICT (profile_id, date, keyword_id) DO UPDATE SET
+                ON CONFLICT (profile_id, date, ad_group_id, keyword_text, match_type) DO UPDATE SET
                     campaign_id = EXCLUDED.campaign_id,
                     campaign_name = EXCLUDED.campaign_name,
                     ad_group_id = EXCLUDED.ad_group_id,
                     ad_group_name = EXCLUDED.ad_group_name,
+                    keyword_id = EXCLUDED.keyword_id,
                     keyword_text = EXCLUDED.keyword_text,
                     match_type = EXCLUDED.match_type,
                     impressions = EXCLUDED.impressions,
@@ -2290,23 +2258,18 @@ def _run_kw_backfill(start, end, chunk_days: int = 7, wait_seconds: int | None =
                     roas = EXCLUDED.roas,
                     run_id = EXCLUDED.run_id,
                     pulled_at = now()
-                RETURNING xmax = 0 AS inserted_flag
             """)
 
-        if rows:
             with engine.begin() as conn:
                 for i in range(0, len(rows), 1000):
-                    batch = rows[i:i+1000]
-                    conn.execute(upsert_sql, batch)
+                    conn.execute(upsert_sql, rows[i:i+1000])
 
             total_upserted = len(rows)
-            BACKFILL_STATUS["kw"]["processed"] += total_upserted
             _bf_set(last_event=f"KW upserted {total_upserted} rows (insert/update split not tracked)")
         else:
             _bf_set(last_event="KW parsed 0 records (nothing to upsert)")
 
-        BACKFILL_STATUS["kw"]["processed"] += parsed
-        cur = chunk_end + timedelta(days=1)
+        cur = chunk_end + _dt.timedelta(days=1)
 
     BACKFILL_STATUS["active"] = False
     BACKFILL_STATUS["finished_at"] = _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
